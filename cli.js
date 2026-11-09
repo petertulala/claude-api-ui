@@ -215,6 +215,59 @@ function listSessions(cwd, limit = 40) {
   return out;
 }
 
+// First prompt (title) and starting directory of a session, from the head of its file.
+function sessionMeta(file) {
+  let title = "", cwd = "";
+  for (const o of jsonLines(readHead(file))) {
+    if (!cwd && typeof o.cwd === "string") cwd = o.cwd;
+    if (!title && o.type === "user" && isMainThread(o)) {
+      const t = textOf((o.message || {}).content).trim();
+      if (t && !t.startsWith("<")) title = t;
+    }
+    if (title && cwd) break;
+  }
+  return { title: title.slice(0, 120), cwd };
+}
+
+// Recent sessions from every directory except `exclude`, newest first, plus the recently used
+// directories. A session is listed only if its directory still exists and maps back to the
+// project folder it is stored in, so that resuming it from that directory works.
+function listAllSessions(exclude, limit = 30) {
+  const skip = exclude ? projectDir(exclude) : null;
+  let files = [];
+  let dirs;
+  try { dirs = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true }).filter(d => d.isDirectory()); }
+  catch { return { sessions: [], folders: [] }; }
+  for (const d of dirs) {
+    const dir = path.join(PROJECTS_DIR, d.name);
+    let names;
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const f of names) {
+      if (!f.endsWith(".jsonl")) continue;
+      const p = path.join(dir, f);
+      try { files.push({ p, dir, id: f.slice(0, -6), mtime: fs.statSync(p).mtimeMs / 1000 }); } catch {}
+    }
+  }
+  files.sort((a, b) => b.mtime - a.mtime);
+  const sessions = [], folders = [], seenFolder = new Set(), badDir = new Set();
+  const doneDir = new Set(); // folder already known (or gone): only needed again for sessions
+  for (const f of files) {
+    if (sessions.length >= limit && folders.length >= 20) break;
+    if (badDir.has(f.dir) || (sessions.length >= limit && doneDir.has(f.dir))) continue;
+    let meta;
+    try { meta = sessionMeta(f.p); } catch { continue; }
+    if (!meta.cwd) continue;
+    const cwd = normCwd(meta.cwd);
+    if (projectDir(cwd) !== f.dir) continue;
+    if (!isDir(cwd)) { badDir.add(f.dir); continue; } // directory deleted: skip all its sessions
+    doneDir.add(f.dir);
+    if (!seenFolder.has(cwd) && folders.length < 20) { seenFolder.add(cwd); folders.push(cwd); }
+    if (f.dir !== skip && sessions.length < limit)
+      sessions.push({ id: f.id, mtime: f.mtime, title: meta.title, cwd });
+  }
+  return { sessions, folders };
+}
+
 function sessionFile(cwd, sid) {
   if (!/^[0-9a-fA-F-]{8,64}$/.test(sid || "")) return null;
   const f = path.join(projectDir(cwd), `${sid}.jsonl`);
@@ -410,6 +463,7 @@ function stream(req, res, run) {
 
 async function handle(req, res, defaultCwd) {
   const url = new URL(req.url, "http://127.0.0.1");
+  if (url.pathname === "/favicon.ico") { res.writeHead(204); return res.end(); }
   if (!authorized(req, url))
     return sendJson(res, { error: "bad token — open the URL printed in the terminal" }, 403);
   const p = url.pathname, q = k => url.searchParams.get(k) || "";
@@ -422,9 +476,10 @@ async function handle(req, res, defaultCwd) {
     }
     if (p === "/api/info") {
       const [, src] = apiKeyEnv();
-      return sendJson(res, { claude_bin: CLAUDE_BIN, default_cwd: defaultCwd, api_key_present: !!src, api_key_from: src });
+      return sendJson(res, { claude_bin: CLAUDE_BIN, default_cwd: defaultCwd, home: HOME, api_key_present: !!src, api_key_from: src });
     }
     if (p === "/api/sessions") return sendJson(res, listSessions(q("cwd")));
+    if (p === "/api/sessions/all") return sendJson(res, listAllSessions(q("exclude")));
     if (p === "/api/history") return sendJson(res, sessionHistory(q("cwd"), q("id")));
     if (p.startsWith("/api/stream/")) {
       const run = RUNS.get(p.split("/").pop());

@@ -91,11 +91,15 @@ group, including tools) · Cmd/Ctrl+K starts a new session.
 
 - The first prompt starts a new session. Each later prompt resumes that session by ID
   (`--resume`), so other Claude sessions in the same directory don't interfere.
-- The **working directory** is locked once a session starts. To work somewhere else, click
-  **New** and change the path.
-- The dropdown lists the sessions Claude Code stored for the working directory
-  (`~/.claude/projects/<dir>/`), including ones started with `claude -p` in a terminal.
-  Picking one replays its history and continues it.
+- The **sessions panel** on the left lists the sessions Claude Code has stored
+  (`~/.claude/projects/`), grouped by folder. That includes sessions started in a terminal or
+  in other Claude Code apps. The current folder comes first, then your other folders, most
+  recently used first. Click a session to show its history and continue it. A session from
+  another folder switches the working directory to that folder. Folders that no longer exist
+  are left out. **☰** in the top bar hides or shows the panel.
+- The **working directory** belongs to the session and is locked once it starts. To start
+  somewhere else, click **+** next to a folder in the panel. Or click **+ New session** and type
+  a path; the path box suggests your recent folders.
 - Settings: **--continue when new** uses `--continue` for the first prompt;
   **fork on resume** adds `--fork-session`.
 
