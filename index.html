@@ -77,7 +77,7 @@
   <span id="sessBadge" class="badge">new session</span>
   <span class="spacer"></span>
   <span id="authBadge" class="badge">auth: ?</span>
-  <span id="costBadge" class="badge" title="Spent by prompts run from this browser tab (sum of result.total_cost_usd). Not your account balance; the API does not expose that.">spent $0.0000</span>
+  <span id="costBadge" class="badge" title="Spent by prompts run from this browser tab (sum of each prompt's own cost). Not your account balance; the API does not expose that.">spent $0.0000</span>
   <a class="badge" href="https://platform.claude.com/settings/billing" target="_blank" rel="noopener" title="Your remaining credit balance is on the Claude Console billing page">balance ↗</a>
   <button id="toggleSettings">Settings</button>
 </header>
@@ -91,6 +91,12 @@
     <option value="plan">plan</option>
     <option value="auto">auto</option>
     <option value="bypassPermissions">bypassPermissions</option>
+  </select></label>
+  <label title="Gives Claude a browser; its tools are allowed automatically">Browser <select id="browser">
+    <option value="">none</option>
+    <option value="chrome">Claude in Chrome (--chrome)</option>
+    <option value="playwright">Playwright MCP (visible window)</option>
+    <option value="playwright-headless">Playwright MCP (headless)</option>
   </select></label>
   <label>Allowed tools <input id="allowed_tools" placeholder='e.g. Bash(git *) Edit Read' size="24"></label>
   <label>Max $/prompt <input id="max_budget" type="number" step="0.5" min="0" placeholder="none" style="width:70px"></label>
@@ -116,7 +122,7 @@ const TOKEN = "__TOKEN__";
 const $ = id => document.getElementById(id);
 const api = (path, opts = {}) => fetch(path, { ...opts, headers: { "X-Token": TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) } }).then(r => r.json());
 
-const SETTINGS = ["model","effort","permission_mode","allowed_tools","max_budget","extra_args","partial","cont","fork","require_api_key","showRaw"];
+const SETTINGS = ["model","effort","permission_mode","browser","allowed_tools","max_budget","extra_args","partial","cont","fork","require_api_key","showRaw"];
 // system event subtypes worth a line in the chat; the rest are progress/bookkeeping.
 const SHOWN_SYSTEM = new Set(["api_retry", "api_error", "compact_boundary", "informational"]);
 const state = { sessionId: null, runId: null, es: null, cost: 0, tools: {}, streamed: new Set(), blocks: {}, curMsgId: null, started: 0, timer: null };
@@ -281,11 +287,12 @@ function onEvent(ev) {
     }
     case "result": {
       setSession(ev.session_id);
-      if (typeof ev.total_cost_usd === "number") { state.cost += ev.total_cost_usd; $("costBadge").textContent = "spent $" + state.cost.toFixed(4); }
+      const runCost = ev.run_cost_usd ?? ev.total_cost_usd;
+      if (typeof runCost === "number") { state.cost += runCost; $("costBadge").textContent = "spent $" + state.cost.toFixed(4); }
       const u = ev.usage || {};
       const tok = `in ${u.input_tokens ?? "?"} · cache r/w ${u.cache_read_input_tokens ?? 0}/${u.cache_creation_input_tokens ?? 0} · out ${u.output_tokens ?? "?"}`;
       const ok = !ev.is_error;
-      add(div("meta", `${ok ? "✓" : "✗ " + esc(ev.subtype)} · ${(ev.duration_ms / 1000).toFixed(1)}s · ${ev.num_turns} turns · $${(ev.total_cost_usd || 0).toFixed(4)} · ${tok}`));
+      add(div("meta", `${ok ? "✓" : "✗ " + esc(ev.subtype)} · ${(ev.duration_ms / 1000).toFixed(1)}s · ${ev.num_turns} turns · ${(runCost || 0).toFixed(4)}${ev.run_cost_usd != null && Math.abs(ev.total_cost_usd - ev.run_cost_usd) > 1e-6 ? " (session $" + ev.total_cost_usd.toFixed(2) + ")" : ""} · ${tok}`));
       if (!ok && ev.result) add(div("stderr", esc(ev.result)));
       if (ev.permission_denials && ev.permission_denials.length)
         add(div("meta", "⚠ denied tools: " + esc(ev.permission_denials.map(d => d.tool_name).join(", ")) + " — allow them in Settings (Allowed tools / Permissions) and ask again."));

@@ -20,6 +20,7 @@ const HOME = os.homedir();
 const KEY_FILE = path.join(HOME, ".config", "claude-api-ui", "api_key");
 const PROJECTS_DIR = path.join(HOME, ".claude", "projects");
 const SETTINGS_FILE = path.join(HOME, ".claude", "settings.json");
+const CLAUDE_JSON = path.join(process.env.CLAUDE_CONFIG_DIR || HOME, ".claude.json");
 const CLAUDE_BIN = process.env.CLAUDE_BIN || which("claude") || "claude";
 
 const TOKEN = crypto.randomBytes(24).toString("base64url");
@@ -44,6 +45,19 @@ function which(cmd) {
 
 function isDir(p) { try { return fs.statSync(p).isDirectory(); } catch { return false; } }
 function isFile(p) { try { return fs.statSync(p).isFile(); } catch { return false; } }
+
+// Session id -> cost claude saved for it (projects[*].lastCost/lastSessionId in ~/.claude.json).
+// Resuming the session that saved last restores that cost, so the run's result.total_cost_usd
+// is the whole session's total, not this run's. Snapshot before spawning to subtract it.
+function savedSessionCosts() {
+  const out = new Map();
+  try {
+    const d = JSON.parse(fs.readFileSync(CLAUDE_JSON, "utf8"));
+    for (const v of Object.values(d.projects || {}))
+      if (v && v.lastSessionId && typeof v.lastCost === "number") out.set(v.lastSessionId, v.lastCost);
+  } catch {}
+  return out;
+}
 
 function claudeSettings() {
   try {
@@ -104,7 +118,20 @@ function buildArgv(o) {
   if (o.model) argv.push("--model", String(o.model));
   if (o.effort) argv.push("--effort", String(o.effort));
   if (o.permission_mode) argv.push("--permission-mode", String(o.permission_mode));
-  const tools = String(o.allowed_tools || "").trim();
+  // Browser tools. -p can't answer permission prompts, so the chosen browser's MCP tools are
+  // pre-allowed (server-level rule = every tool of that server).
+  const allow = [];
+  const browser = String(o.browser || "");
+  if (browser === "chrome") {
+    argv.push("--chrome"); // the Claude in Chrome extension, driving your own Chrome window
+    allow.push("mcp__claude-in-chrome");
+  } else if (browser === "playwright" || browser === "playwright-headless") {
+    const args = ["-y", "@playwright/mcp@latest"];
+    if (browser === "playwright-headless") args.push("--headless");
+    argv.push("--mcp-config", JSON.stringify({ mcpServers: { playwright: { command: "npx", args } } }));
+    allow.push("mcp__playwright");
+  }
+  const tools = [String(o.allowed_tools || "").trim(), ...allow].filter(Boolean).join(" ");
   if (tools) argv.push("--allowedTools", tools);
   if (o.max_budget) argv.push("--max-budget-usd", String(o.max_budget));
   const extra = String(o.extra_args || "").trim();
@@ -190,8 +217,11 @@ function sessionHistory(cwd, sid) {
 // ---------- runs ------------------------------------------------------------
 
 class Run {
-  constructor(id, argv, cwd, prompt, env, requireApiKey) {
+  constructor(id, argv, cwd, prompt, env, requireApiKey, resumeId) {
     this.id = id;
+    this.savedCosts = savedSessionCosts(); // before spawn: what claude may restore
+    this.resumeId = resumeId || null;
+    this.baseline = 0;
     this.events = []; // [kind, payload]
     this.listeners = new Set();
     this.done = false;
@@ -207,6 +237,7 @@ class Run {
       let obj;
       try { obj = JSON.parse(line); } catch { return this.push("stderr", line); }
       this.guard(obj);
+      this.accountCost(obj);
       this.push("event", obj);
     });
     readline.createInterface({ input: this.proc.stderr, crlfDelay: Infinity }).on("line", line => {
@@ -223,6 +254,16 @@ class Run {
   push(kind, payload) {
     this.events.push([kind, payload]);
     for (const l of this.listeners) l([kind, payload]);
+  }
+
+  // Adds run_cost_usd (this run alone) to the result event; see savedSessionCosts().
+  accountCost(obj) {
+    if (obj.type === "system" && obj.subtype === "init") {
+      this.baseline = this.savedCosts.get(obj.session_id) ?? this.savedCosts.get(this.resumeId) ?? 0;
+    } else if (obj.type === "result" && typeof obj.total_cost_usd === "number") {
+      const t = obj.total_cost_usd;
+      obj.run_cost_usd = t >= this.baseline ? t - this.baseline : t; // below baseline = nothing restored
+    }
   }
 
   // Stop the run if it is not billed to the API key and the user required that.
@@ -338,7 +379,7 @@ async function handle(req, res, defaultCwd) {
       try { argv = buildArgv(o); } catch (e) { return sendJson(res, { error: `extra args: ${e.message}` }, 400); }
       const id = crypto.randomBytes(8).toString("hex");
       let run;
-      try { run = new Run(id, argv, cwd, prompt, env, !!require); }
+      try { run = new Run(id, argv, cwd, prompt, env, !!require, o.session_id); }
       catch (e) { return sendJson(res, { error: `cannot start ${CLAUDE_BIN}: ${e.message}` }, 500); }
       RUNS.set(id, run);
       return sendJson(res, { run_id: id, argv, cwd });

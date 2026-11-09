@@ -98,6 +98,10 @@ group, including tools) · Cmd/Ctrl+K starts a new session.
 - **Require API key** (Settings, on by default) refuses to start without a key and stops any run
   that would be billed some other way, such as a logged-in subscription.
 - **Max $/prompt** maps to `--max-budget-usd`.
+- Each answer shows the cost of that prompt alone. When `claude` resumes the session it saved
+  last, it restores that session's cost (`lastCost` in `~/.claude.json`), so `total_cost_usd`
+  becomes the session total. The server subtracts what was saved before the run. The session
+  total is shown in brackets.
 - The **spent** badge adds up the cost of the prompts run in the current browser tab. It is not
   your account balance; the API doesn't expose that, so **balance ↗** links to the Console
   billing page.
@@ -108,6 +112,21 @@ group, including tools) · Cmd/Ctrl+K starts a new session.
 result line lists the denied tools. Allow them under Settings with **Allowed tools**
 (e.g. `Bash(git *) Edit`) or a **Permissions** mode (`acceptEdits`, `auto`,
 `bypassPermissions`), then ask again.
+
+### Browser
+
+**Browser** (Settings) gives Claude a web browser. The tools of the chosen browser are
+pre-allowed, because `-p` can't ask for approval:
+
+- **Claude in Chrome**: passes `--chrome` and drives your own Chrome, with your logins,
+  through the Claude in Chrome extension. The extension must be installed and signed in.
+  Its site permissions are still asked for in Chrome itself.
+- **Playwright MCP**: loads [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp)
+  via `npx` (Node 18+). It opens its own Chrome window with a separate profile, so you start
+  logged out of everything. The headless variant shows no window.
+
+Either way, the model's tokens are billed like any other run. Screenshots and page snapshots
+are input tokens, so browser-heavy prompts cost more; use **Max $/prompt** to cap them.
 
 ### Other settings
 
