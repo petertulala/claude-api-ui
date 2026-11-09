@@ -10,6 +10,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
+const net = require("net");
 const os = require("os");
 const path = require("path");
 const readline = require("readline");
@@ -135,17 +136,10 @@ function buildArgv(o) {
     argv.push("--chrome"); // the Claude in Chrome extension, driving your own Chrome window
     allow.push("mcp__" + CHROME_MCP);
   } else if (browser.startsWith("playwright")) {
-    const args = ["-y", "@playwright/mcp@latest"];
-    if (browser === "playwright-headless") args.push("--headless");
-    // Attach to your running Chrome (its tabs, profile and logins) through the Playwright
-    // extension, instead of launching a separate browser with an empty profile.
-    const server = { command: "npx", args };
-    if (browser.startsWith("playwright-extension")) args.push("--extension");
-    // Other Chromium browsers: point Playwright at the browser's binary, so it looks for the
-    // extension in that browser instead of Google Chrome.
-    if (browser === "playwright-extension-brave")
-      server.env = { PLAYWRIGHT_MCP_EXECUTABLE_PATH: BRAVE_BIN };
-    argv.push("--mcp-config", JSON.stringify({ mcpServers: { playwright: server } }));
+    // A shared Playwright MCP server that the app keeps running (see ensurePlaywright), so the
+    // browser connection survives from one prompt to the next. o.playwright_url is set by the
+    // /api/run handler once that server is up.
+    argv.push("--mcp-config", JSON.stringify({ mcpServers: { playwright: { type: "http", url: o.playwright_url } } }));
     allow.push("mcp__playwright");
   }
   const tools = [String(o.allowed_tools || "").trim(), ...allow].filter(Boolean).join(" ");
@@ -285,6 +279,201 @@ function sessionHistory(cwd, sid) {
 }
 
 // ---------- runs ------------------------------------------------------------
+
+// ---------- shared Playwright MCP servers ----------
+// One long-running `@playwright/mcp --port` server per Browser option, started on first use and
+// kept until the app quits. claude runs connect to it over HTTP, so the browser (and, in
+// extension mode, the extension's connection to your own browser) stays open between prompts
+// and sessions instead of being restarted with every `claude -p`.
+const PLAYWRIGHT = new Map(); // browser option -> { port, proc, ready, log }
+
+// Extra environment for the server: the `env` of ~/.claude/settings.json (where
+// PLAYWRIGHT_MCP_EXTENSION_TOKEN lives; claude applied it when claude started Playwright itself),
+// without Anthropic credentials, which Playwright doesn't need.
+function settingsEnv() {
+  const e = claudeSettings().env;
+  const out = {};
+  if (e && typeof e === "object")
+    for (const [k, v] of Object.entries(e)) if (typeof v === "string" && !k.startsWith("ANTHROPIC_")) out[k] = v;
+  return out;
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+  });
+}
+
+function waitForPort(port, timeoutMs, alive) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      if (!alive()) return reject(new Error("the server exited"));
+      const sock = net.connect(port, "127.0.0.1");
+      sock.once("connect", () => { sock.destroy(); resolve(); });
+      sock.once("error", () => {
+        sock.destroy();
+        if (Date.now() > deadline) reject(new Error(`no answer on port ${port} after ${timeoutMs / 1000}s`));
+        else setTimeout(attempt, 300);
+      });
+    };
+    attempt();
+  });
+}
+
+// Returns the URL of the running server for this Browser option, starting it if needed.
+async function ensurePlaywright(browser) {
+  const cur = PLAYWRIGHT.get(browser);
+  if (cur && cur.proc.exitCode === null && cur.proc.signalCode === null) {
+    await cur.ready;
+    keepPlaywrightConnected(cur); // reconnects if the browser was closed in the meantime
+    return `http://127.0.0.1:${cur.port}/mcp`;
+  }
+  const port = await freePort();
+  const args = ["-y", "@playwright/mcp@latest", "--port", String(port), "--host", "127.0.0.1", "--shared-browser-context"];
+  if (browser === "playwright-headless") args.push("--headless");
+  if (browser.startsWith("playwright-extension")) args.push("--extension");
+  const env = { ...process.env, ...settingsEnv() };
+  // Other Chromium browsers: point Playwright at the browser's binary, so it looks for the
+  // extension in that browser instead of Google Chrome.
+  if (browser === "playwright-extension-brave") env.PLAYWRIGHT_MCP_EXECUTABLE_PATH = BRAVE_BIN;
+  const npx = process.platform === "win32" ? "npx.cmd" : "npx";
+  const proc = spawn(npx, args, { env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+  const entry = { browser, port, proc, log: [], anchor: null, anchoring: null };
+  const keep = line => { if (line) { entry.log.push(line); if (entry.log.length > 30) entry.log.shift(); } };
+  readline.createInterface({ input: proc.stdout }).on("line", keep);
+  readline.createInterface({ input: proc.stderr }).on("line", keep);
+  proc.on("error", e => keep(`cannot run ${npx}: ${e.message}`));
+  proc.on("exit", () => { if (PLAYWRIGHT.get(browser) === entry) PLAYWRIGHT.delete(browser); });
+  const alive = () => proc.exitCode === null && proc.signalCode === null && !!proc.pid;
+  entry.ready = waitForPort(port, 120000, alive).catch(e => {
+    killGroup(proc, "SIGTERM");
+    if (PLAYWRIGHT.get(browser) === entry) PLAYWRIGHT.delete(browser);
+    throw new Error(`Playwright MCP did not start (${e.message}). ${entry.log.slice(-5).join(" | ")}`);
+  });
+  PLAYWRIGHT.set(browser, entry);
+  console.log(`  Playwright MCP (${browser}) starting on port ${port}`);
+  await entry.ready;
+  keepPlaywrightConnected(entry);
+  return `http://127.0.0.1:${port}/mcp`;
+}
+
+// ---- the app's own, permanent client of the shared server ----
+// Playwright MCP closes the browser (and the extension's connection to yours) when its last
+// client disconnects, which is every time a `claude -p` run ends. So the app stays connected as
+// an idle client of its own for as long as the server runs: an MCP session over Streamable
+// HTTP, opened with one harmless call (list tabs) so the shared browser connection is created
+// with the app as a member. claude runs join and leave it; it closes only when the app quits.
+
+// One JSON-RPC message to the server. Resolves with the session id and, for requests, the
+// response (sent as plain JSON or as an SSE event).
+function mcpPost(port, session, msg) {
+  return new Promise((resolve, reject) => {
+    const body = Buffer.from(JSON.stringify(msg));
+    const headers = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                      "Content-Length": body.length };
+    if (session) headers["mcp-session-id"] = session;
+    const req = http.request({ host: "127.0.0.1", port, path: "/mcp", method: "POST", headers }, res => {
+      const sid = res.headers["mcp-session-id"] || session;
+      if (msg.id === undefined) { res.resume(); return resolve({ sid }); }
+      res.setEncoding("utf8");
+      let buf = "", done = false;
+      const finish = result => { if (!done) { done = true; resolve({ sid, result }); res.destroy(); } };
+      res.on("data", chunk => {
+        buf += chunk;
+        const lines = buf.split("\n");
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          try { const o = JSON.parse(line.slice(5)); if (o.id === msg.id) return finish(o); } catch {}
+        }
+      });
+      res.on("end", () => { let o = null; try { o = JSON.parse(buf); } catch {} finish(o); });
+    });
+    req.on("error", reject);
+    req.setTimeout(180000, () => req.destroy(new Error("no response from Playwright MCP")));
+    req.end(body);
+  });
+}
+
+async function anchorPlaywright(entry) {
+  const init = await mcpPost(entry.port, null, {
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "claude-api-ui", version: PKG.version } },
+  });
+  if (!init.sid || !init.result || init.result.error) throw new Error("initialize failed");
+  await mcpPost(entry.port, init.sid, { jsonrpc: "2.0", method: "notifications/initialized" });
+  // Open the session's server-to-client stream, as MCP clients do. The server pings on it every
+  // few seconds and ends the session if a ping goes unanswered, so answer each one.
+  const sid = init.sid;
+  const stream = http.request({ host: "127.0.0.1", port: entry.port, path: "/mcp", method: "GET",
+    headers: { Accept: "text/event-stream", "mcp-session-id": sid } }, res => {
+    res.setEncoding("utf8");
+    let buf = "";
+    res.on("data", chunk => {
+      buf += chunk;
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        let o;
+        try { o = JSON.parse(line.slice(5)); } catch { continue; }
+        if (o.method === "ping" && o.id !== undefined)
+          mcpPost(entry.port, sid, { jsonrpc: "2.0", id: o.id, result: {} }).catch(() => {});
+      }
+    });
+    res.on("end", () => { if (entry.anchor === sid) entry.anchor = null; }); // reconnects on the next prompt
+  });
+  stream.on("error", () => { if (entry.anchor === sid) entry.anchor = null; });
+  stream.end();
+  entry.anchorStream = stream;
+  const r = await mcpPost(entry.port, init.sid, {
+    jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "browser_tabs", arguments: { action: "list" } },
+  });
+  const res = r.result && r.result.result;
+  if (!res || res.isError) {
+    stream.destroy();
+    const text = res && Array.isArray(res.content) ? res.content.map(c => c.text || "").join(" ") : JSON.stringify(r.result);
+    throw new Error(String(text).slice(0, 300));
+  }
+  entry.anchor = init.sid;
+  console.log(`  Playwright MCP (${entry.browser}): browser connected, kept open between prompts`);
+}
+
+// Starts the app's client if it isn't connected yet. Not awaited: the run doesn't need it, and
+// with the extension the connection can wait for you to approve it in the browser.
+function keepPlaywrightConnected(entry) {
+  if (entry.anchoring) return;
+  entry.anchoring = (async () => {
+    if (entry.anchor) {
+      // Still connected? (The browser may have gone away, e.g. you quit it.)
+      try {
+        const r = await mcpPost(entry.port, entry.anchor, { jsonrpc: "2.0", id: 3, method: "tools/call",
+          params: { name: "browser_tabs", arguments: { action: "list" } } });
+        if (r.result && r.result.result && !r.result.result.isError) return;
+      } catch {}
+      if (entry.anchorStream) entry.anchorStream.destroy();
+      entry.anchor = null;
+    }
+    await anchorPlaywright(entry);
+  })().catch(e => {
+    entry.log.push(`keep-alive client: ${e.message}`);
+    console.log(`  Playwright MCP (${entry.browser}): couldn't keep the browser connected: ${e.message}`);
+  }).finally(() => { entry.anchoring = null; });
+}
+
+function killGroup(proc, sig) {
+  if (!proc || !proc.pid) return;
+  try {
+    if (process.platform === "win32") proc.kill(sig);
+    else process.kill(-proc.pid, sig);
+  } catch {}
+}
+
+function stopPlaywright() { for (const e of PLAYWRIGHT.values()) killGroup(e.proc, "SIGTERM"); }
 
 class Run {
   constructor(id, argv, cwd, prompt, env, requireApiKey, resumeId, browser) {
@@ -506,6 +695,10 @@ async function handle(req, res, defaultCwd) {
       if (require && !src)
         return sendJson(res, { error: `ANTHROPIC_API_KEY is not set (env, ${SETTINGS_FILE} env, or ` +
                                       `${KEY_FILE}) and 'Require API key' is on` }, 400);
+      if (String(o.browser || "").startsWith("playwright")) {
+        try { o.playwright_url = await ensurePlaywright(String(o.browser)); }
+        catch (e) { return sendJson(res, { error: e.message }, 500); }
+      }
       let argv;
       try { argv = buildArgv(o); } catch (e) { return sendJson(res, { error: `extra args: ${e.message}` }, 400); }
       const id = crypto.randomBytes(8).toString("hex");
@@ -608,7 +801,7 @@ async function main() {
   console.log(`claude-api-ui on ${url}\n  claude:  ${CLAUDE_BIN}\n  cwd:     ${defaultCwd}\n` +
               `  API key: ${apiKeyEnv()[1] || "NOT SET"}\nCtrl+C to quit.`);
   if (a.browser) setTimeout(() => openBrowser(url), 400);
-  const quit = () => { for (const r of RUNS.values()) r.stop(); setTimeout(() => process.exit(0), 200); };
+  const quit = () => { for (const r of RUNS.values()) r.stop(); stopPlaywright(); setTimeout(() => process.exit(0), 200); };
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
 }

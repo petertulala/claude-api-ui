@@ -160,7 +160,7 @@ pre-allowed, because `-p` can't ask for approval.
 | ------ | ---------------- | ----------- | ------- |
 | **Your Chrome (Playwright extension)** | your running Chrome, in new tabs | yes | API key |
 | **Your Brave (Playwright extension)** | your running Brave, in new tabs | yes | API key |
-| **Playwright MCP** (visible / headless) | a separate browser with an empty profile | no | API key |
+| **Playwright MCP** (visible / headless) | a separate browser with its own profile, kept while the app runs | no | API key |
 | **Claude in Chrome** | your Chrome, via the Claude in Chrome extension | yes | claude.ai account only (see below) |
 
 #### Use your own browser (Chrome or Brave)
@@ -188,10 +188,20 @@ This lets Claude open pages in your everyday browser, with your profile and logi
    It must match the browser where you installed the extension.
 
 Then keep that browser open and ask, for example, "Open https://example.com in a new tab
-and tell me the title." Each run opens the extension's **Welcome** tab to connect; with the
-token saved it connects without asking, and you can close that tab. Without the token, click
-the button on the Welcome page to allow the connection. Until you do, Claude's browser calls
-wait.
+and tell me the title." The first time, the extension opens its **Welcome** tab to connect.
+With the token saved it connects without asking, and you can close that tab. Without the
+token, click the button on the Welcome page to allow the connection; until you do, Claude's
+browser calls wait.
+
+The connection stays open between prompts. The app runs one Playwright MCP server per Browser
+option (`@playwright/mcp --port … --shared-browser-context`), started on first use and kept
+until you quit `claude-api-ui`. Each `claude` run connects to it over local HTTP instead of
+starting its own. Playwright closes the browser connection when its last client disconnects,
+which would otherwise happen whenever a prompt finishes. So the app stays connected to that
+server as an idle client of its own. Follow-up prompts and other sessions therefore keep the
+same browser connection and tabs, and the Welcome tab appears once per app start, not per
+prompt. If the browser goes away (for example, you quit it), the next prompt reconnects. The app passes on the `env` of `~/.claude/settings.json` (such as the extension token) to
+that server, without your Anthropic key.
 
 Brave: Playwright officially supports only Chrome and Edge. The Brave option points Playwright
 at the Brave binary (`PLAYWRIGHT_MCP_EXECUTABLE_PATH`), and it works with Brave on macOS.
