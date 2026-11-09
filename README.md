@@ -7,6 +7,11 @@ It gives you a chat window in the browser that streams Claude's answers, tool ca
 results live, resumes earlier sessions, and shows what each prompt cost. It has no
 dependencies: one Node.js script and one HTML page.
 
+![claude-api-ui fixing a failing test: streamed answer, tool calls with their results, and the cost of the prompt](https://raw.githubusercontent.com/petertulala/claude-api-ui/main/docs/screenshot.png)
+
+> Unofficial community project, not affiliated with or endorsed by Anthropic. Claude and
+> Claude Code are trademarks of Anthropic, PBC.
+
 ## Requirements
 
 - **Node.js 18+**
