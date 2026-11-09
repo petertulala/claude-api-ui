@@ -113,6 +113,18 @@ result line lists the denied tools. Allow them under Settings with **Allowed too
 (e.g. `Bash(git *) Edit`) or a **Permissions** mode (`acceptEdits`, `auto`,
 `bypassPermissions`), then ask again.
 
+### Images
+
+Paste an image into the prompt box with **Cmd+V / Ctrl+V**, or drop image files on it. Each
+one shows as a thumbnail with a × to remove it. If the clipboard also holds text (e.g. cells
+copied from a spreadsheet), the text is pasted instead. Images whose longer side exceeds
+1568 px are scaled down first; the API would shrink them anyway, and smaller images cost fewer
+input tokens. PNG, JPEG, GIF and WebP are accepted, up to 20 per prompt.
+
+A prompt with images is sent as one stream-json user message (`--input-format stream-json`)
+with image blocks. Text-only prompts still go in as plain text. Images in a resumed session's
+history are shown too.
+
 ### Browser
 
 **Browser** (Settings) gives Claude a web browser. The tools of the chosen browser are

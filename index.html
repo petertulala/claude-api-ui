@@ -63,6 +63,15 @@
   footer .wrap { display:flex; gap:8px; align-items:flex-end; }
   #prompt { flex:1; resize:none; min-height:44px; max-height:40vh; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:10px; font:inherit; }
   #prompt:focus { outline:none; border-color:var(--accent); }
+  #prompt.drop { border-color:var(--accent); border-style:dashed; }
+  #attachments { display:flex; gap:8px; flex-wrap:wrap; }
+  #attachments:empty { display:none; }
+  #attachments { margin-bottom:8px; }
+  .thumb { position:relative; }
+  .thumb img, .user-imgs img { height:64px; max-width:160px; object-fit:cover; border-radius:6px; border:1px solid var(--line); display:block; }
+  .thumb button { position:absolute; top:-7px; right:-7px; width:20px; height:20px; padding:0; border-radius:50%; font-size:12px; line-height:18px; }
+  .user-imgs { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  .user-imgs img { cursor:zoom-in; }
   #status { font-size:12px; color:var(--dim); margin-top:6px; }
   .spin { display:inline-block; animation:spin 1s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
@@ -109,8 +118,9 @@
 </div>
 <div id="log"><div class="wrap" id="logInner"></div></div>
 <footer>
+  <div class="wrap" style="display:block"><div id="attachments"></div></div>
   <div class="wrap">
-    <textarea id="prompt" rows="2" placeholder="Ask Claude…  (Enter to send, Shift+Enter for newline, Esc to stop)"></textarea>
+    <textarea id="prompt" rows="2" placeholder="Ask Claude…  (Enter to send, Shift+Enter for newline, Cmd/Ctrl+V or drop to attach an image, Esc to stop)"></textarea>
     <button id="send" class="primary">Send</button>
     <button id="stop" disabled>Stop</button>
   </div>
@@ -235,7 +245,20 @@ function renderToolResult(b) {
   if (d) { d.classList.add(b.is_error ? "error" : "done"); d.appendChild(pre); follow(); }
   else add(div("meta", "tool result: " + esc(txt.slice(0, 500))));
 }
-function renderUserPrompt(text) { const d = div("user"); d.textContent = text; stick = true; add(d); }
+// images: [{media_type, data}] (base64), shown as thumbnails under the text; click opens full size.
+function renderUserPrompt(text, images = []) {
+  const d = div("user"); d.textContent = text || "(image)";
+  if (images.length) {
+    const row = document.createElement("div"); row.className = "user-imgs";
+    for (const im of images) {
+      const img = document.createElement("img"); img.src = `data:${im.media_type};base64,${im.data}`;
+      img.onclick = () => window.open().document.write(`<img src="${img.src}" style="max-width:100%">`);
+      row.appendChild(img);
+    }
+    d.appendChild(row);
+  }
+  stick = true; add(d);
+}
 
 function onEvent(ev) {
   if ($("showRaw").checked) add(div("raw", esc(JSON.stringify(ev))));
@@ -292,7 +315,7 @@ function onEvent(ev) {
       const u = ev.usage || {};
       const tok = `in ${u.input_tokens ?? "?"} · cache r/w ${u.cache_read_input_tokens ?? 0}/${u.cache_creation_input_tokens ?? 0} · out ${u.output_tokens ?? "?"}`;
       const ok = !ev.is_error;
-      add(div("meta", `${ok ? "✓" : "✗ " + esc(ev.subtype)} · ${(ev.duration_ms / 1000).toFixed(1)}s · ${ev.num_turns} turns · ${(runCost || 0).toFixed(4)}${ev.run_cost_usd != null && Math.abs(ev.total_cost_usd - ev.run_cost_usd) > 1e-6 ? " (session $" + ev.total_cost_usd.toFixed(2) + ")" : ""} · ${tok}`));
+      add(div("meta", `${ok ? "✓" : "✗ " + esc(ev.subtype)} · ${(ev.duration_ms / 1000).toFixed(1)}s · ${ev.num_turns} turns · $${(runCost || 0).toFixed(4)}${ev.run_cost_usd != null && Math.abs(ev.total_cost_usd - ev.run_cost_usd) > 1e-6 ? " (session $" + ev.total_cost_usd.toFixed(2) + ")" : ""} · ${tok}`));
       if (!ok && ev.result) add(div("stderr", esc(ev.result)));
       if (ev.permission_denials && ev.permission_denials.length)
         add(div("meta", "⚠ denied tools: " + esc(ev.permission_denials.map(d => d.tool_name).join(", ")) + " — allow them in Settings (Allowed tools / Permissions) and ask again."));
@@ -344,7 +367,9 @@ $("sessions").onchange = async () => {
       if (typeof c === "string") { if (!c.startsWith("<")) renderUserPrompt(c); }
       else if (Array.isArray(c)) {
         const t = c.filter(b => b.type === "text").map(b => b.text).join("\n");
-        if (t && !t.startsWith("<")) renderUserPrompt(t);
+        const imgs = c.filter(b => b.type === "image" && b.source && b.source.type === "base64")
+                      .map(b => ({ media_type: b.source.media_type, data: b.source.data }));
+        if ((t && !t.startsWith("<")) || imgs.length) renderUserPrompt(t.startsWith("<") ? "" : t, imgs);
         c.filter(b => b.type === "tool_result").forEach(renderToolResult);
       }
     } else onEvent({ type: "assistant", message: { ...h.message, id: "hist-" + Math.random() } });
@@ -365,15 +390,77 @@ function setRunning(on) {
     tick(); state.timer = setInterval(tick, 500);
   }
 }
+// ---------- pasted / dropped images ----------
+state.images = [];
+const MAX_EDGE = 1568; // the API scales larger images down anyway; smaller = fewer tokens
+function renderAttachments() {
+  const box = $("attachments"); box.innerHTML = "";
+  state.images.forEach((im, i) => {
+    const t = document.createElement("div"); t.className = "thumb";
+    t.innerHTML = `<img src="data:${im.media_type};base64,${im.data}" title="${esc(im.name || "pasted image")}"><button title="Remove">×</button>`;
+    t.querySelector("button").onclick = () => { state.images.splice(i, 1); renderAttachments(); };
+    box.appendChild(t);
+  });
+}
+function fileToImage(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(r.error);
+    r.onload = () => {
+      const url = r.result, type = file.type;
+      const img = new Image();
+      img.onerror = () => reject(new Error("not a readable image"));
+      img.onload = () => {
+        const scale = Math.min(1, MAX_EDGE / Math.max(img.width, img.height));
+        const keep = scale === 1 && ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(type);
+        if (keep) return resolve({ media_type: type, data: url.split(",")[1], name: file.name });
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        const out = type === "image/jpeg" ? "image/jpeg" : "image/png";
+        resolve({ media_type: out, data: c.toDataURL(out, 0.9).split(",")[1], name: file.name });
+      };
+      img.src = url;
+    };
+    r.readAsDataURL(file);
+  });
+}
+async function addImageFiles(files) {
+  for (const f of files) {
+    if (!f.type.startsWith("image/")) continue;
+    try { state.images.push(await fileToImage(f)); }
+    catch (e) { add(div("stderr", esc(`${f.name || "image"}: ${e.message}`))); }
+  }
+  renderAttachments();
+}
+$("prompt").addEventListener("paste", e => {
+  const items = [...(e.clipboardData?.items || [])];
+  const files = items.filter(i => i.kind === "file" && i.type.startsWith("image/")).map(i => i.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  // Text in the clipboard too (e.g. cells copied from a spreadsheet): paste the text, not a picture of it.
+  if (e.clipboardData.getData("text/plain")) return;
+  e.preventDefault();
+  addImageFiles(files);
+});
+$("prompt").addEventListener("dragover", e => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); $("prompt").classList.add("drop"); } });
+$("prompt").addEventListener("dragleave", () => $("prompt").classList.remove("drop"));
+$("prompt").addEventListener("drop", e => {
+  $("prompt").classList.remove("drop");
+  if (!e.dataTransfer.files.length) return;
+  e.preventDefault(); addImageFiles([...e.dataTransfer.files]);
+});
+
 async function send() {
   const prompt = $("prompt").value;
-  if (!prompt.trim() || state.runId) return;
+  const images = state.images.map(({ media_type, data }) => ({ media_type, data }));
+  if ((!prompt.trim() && !images.length) || state.runId) return;
   if (!state.sessionCwd) lockCwd($("cwd").value);
-  const body = { prompt, cwd: state.sessionCwd, session_id: state.sessionId };
+  const body = { prompt, images, cwd: state.sessionCwd, session_id: state.sessionId };
   for (const k of SETTINGS) { const el = $(k); body[k === "cont" ? "continue" : k] = el.type === "checkbox" ? el.checked : el.value; }
   if (state.sessionId) body.continue = false;
-  renderUserPrompt(prompt);
+  renderUserPrompt(prompt, images);
   $("prompt").value = ""; autosize();
+  state.images = []; renderAttachments();
   $("status").textContent = "starting…";
   const r = await api("/api/run", { method: "POST", body: JSON.stringify(body) });
   if (r.error) {

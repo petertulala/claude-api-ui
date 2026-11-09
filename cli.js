@@ -111,6 +111,7 @@ function shellSplit(s) {
 function buildArgv(o) {
   const argv = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose"];
   if (o.partial ?? true) argv.push("--include-partial-messages");
+  if (o.images && o.images.length) argv.push("--input-format", "stream-json"); // images need a message, not text
   if (o.session_id) {
     argv.push("--resume", String(o.session_id));
     if (o.fork) argv.push("--fork-session");
@@ -307,13 +308,37 @@ function authorized(req, url) {
   return tok.length === want.length && crypto.timingSafeEqual(tok, want);
 }
 
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_IMAGES = 20;
+
+// Pasted images: [{media_type, data (base64)}], validated.
+function checkImages(list) {
+  if (list == null) return [];
+  if (!Array.isArray(list)) throw new Error("images must be a list");
+  if (list.length > MAX_IMAGES) throw new Error(`at most ${MAX_IMAGES} images per prompt`);
+  return list.map((im, i) => {
+    if (!im || !IMAGE_TYPES.has(im.media_type)) throw new Error(`image ${i + 1}: type must be png, jpeg, gif or webp`);
+    const data = String(im.data || "");
+    if (!/^[A-Za-z0-9+/]+=*$/.test(data)) throw new Error(`image ${i + 1}: data is not base64`);
+    if (data.length * 0.75 > 5 * 1024 * 1024) throw new Error(`image ${i + 1}: over the API's 5 MB limit`);
+    return { media_type: im.media_type, data };
+  });
+}
+
+// One stream-json input line: a user message with the images first, then the text.
+function userMessageLine(text, images) {
+  const content = images.map(im => ({ type: "image", source: { type: "base64", media_type: im.media_type, data: im.data } }));
+  if (text.trim()) content.push({ type: "text", text });
+  return JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n";
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     req.on("data", c => {
       size += c.length;
-      if (size > 10 * 1024 * 1024) { reject(new Error("request too large")); req.destroy(); }
+      if (size > 64 * 1024 * 1024) { reject(new Error("request too large")); req.destroy(); }
       else chunks.push(c);
     });
     req.on("end", () => {
@@ -368,8 +393,12 @@ async function handle(req, res, defaultCwd) {
       if (sid && !sessionFile(cwd, sid))
         return sendJson(res, { error: `session ${sid} is not stored for ${cwd}; a session keeps the ` +
                                       "directory it started in (click New to use another directory)" }, 400);
-      const prompt = String(o.prompt || "");
-      if (!prompt.trim()) return sendJson(res, { error: "empty prompt" }, 400);
+      let prompt = String(o.prompt || "");
+      let images;
+      try { images = checkImages(o.images); } catch (e) { return sendJson(res, { error: e.message }, 400); }
+      if (!prompt.trim() && !images.length) return sendJson(res, { error: "empty prompt" }, 400);
+      o.images = images;
+      if (images.length) prompt = userMessageLine(prompt, images);
       const [env, src] = apiKeyEnv();
       const require = o.require_api_key ?? true;
       if (require && !src)
