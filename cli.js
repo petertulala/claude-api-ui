@@ -349,7 +349,6 @@ async function ensurePlaywright(browser) {
   const cur = PLAYWRIGHT.get(browser);
   if (cur && cur.proc.exitCode === null && cur.proc.signalCode === null) {
     await cur.ready;
-    keepPlaywrightConnected(cur); // reconnects if the browser was closed in the meantime
     return `http://127.0.0.1:${cur.port}/mcp`;
   }
   const port = await freePort();
@@ -377,7 +376,6 @@ async function ensurePlaywright(browser) {
   PLAYWRIGHT.set(browser, entry);
   console.log(`  Playwright MCP (${browser}) starting on port ${port}`);
   await entry.ready;
-  keepPlaywrightConnected(entry);
   return `http://127.0.0.1:${port}/mcp`;
 }
 
@@ -520,6 +518,7 @@ class Run {
       let obj;
       try { obj = JSON.parse(line); } catch { return this.push("stderr", line); }
       this.guard(obj);
+      this.watchBrowserUse(obj);
       this.accountCost(obj);
       this.push("event", obj);
       if (obj.type === "result") this.endInput();
@@ -538,6 +537,19 @@ class Run {
   push(kind, payload) {
     this.events.push([kind, payload]);
     for (const l of this.listeners) l([kind, payload]);
+  }
+
+  // Once Claude uses a Playwright tool in this run, the app joins that browser connection and
+  // keeps it open for later prompts (see keepPlaywrightConnected). Not before: connecting is what
+  // makes the extension attach to your browser, which shouldn't happen for prompts that don't
+  // use it.
+  watchBrowserUse(obj) {
+    if (this.browserUsed || obj.type !== "assistant" || !this.browser.startsWith("playwright")) return;
+    const content = (obj.message && obj.message.content) || [];
+    if (!content.some(b => b && b.type === "tool_use" && String(b.name).startsWith("mcp__playwright__"))) return;
+    this.browserUsed = true;
+    const entry = PLAYWRIGHT.get(this.browser);
+    if (entry) keepPlaywrightConnected(entry);
   }
 
   // Adds run_cost_usd to each result event: the cost since the previous total. total_cost_usd is

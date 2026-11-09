@@ -7,7 +7,7 @@ It gives you a chat window in the browser that streams Claude's answers, tool ca
 results live, resumes earlier sessions, and shows what each prompt cost. It has no
 dependencies: one Node.js script and one HTML page.
 
-![claude-api-ui fixing a failing test: streamed answer, tool calls with their results, and the cost of the prompt](https://raw.githubusercontent.com/petertulala/claude-api-ui/main/docs/screenshot.png)
+![claude-api-ui: sessions of several projects in the left panel, and a streamed answer fixing a failing test, with tool calls and the cost of the prompt](https://raw.githubusercontent.com/petertulala/claude-api-ui/main/docs/screenshot.png)
 
 > Unofficial community project, not affiliated with or endorsed by Anthropic. Claude and
 > Claude Code are trademarks of Anthropic, PBC.
@@ -198,14 +198,20 @@ token, click the button on the Welcome page to allow the connection; until you d
 browser calls wait.
 
 The connection stays open between prompts. The app runs one Playwright MCP server per Browser
-option (`@playwright/mcp --port … --shared-browser-context`), started on first use and kept
-until you quit `claude-api-ui`. Each `claude` run connects to it over local HTTP instead of
-starting its own. Playwright closes the browser connection when its last client disconnects,
-which would otherwise happen whenever a prompt finishes. So the app stays connected to that
-server as an idle client of its own. Follow-up prompts and other sessions therefore keep the
-same browser connection and tabs, and the Welcome tab appears once per app start, not per
-prompt. If the browser goes away (for example, you quit it), the next prompt reconnects. The app passes on the `env` of `~/.claude/settings.json` (such as the extension token) to
-that server, without your Anthropic key.
+option (`@playwright/mcp --port … --shared-browser-context`), started on first use and stopped
+when you quit `claude-api-ui`. Each `claude` run connects to it over local HTTP instead of
+starting its own.
+
+- **Only when used:** the server opens the browser connection on the first browser tool call.
+  Prompts that don't use the browser leave your browser alone.
+- **Kept open:** Playwright closes the browser connection when its last client disconnects,
+  which would otherwise happen whenever a prompt finishes. So once Claude has used the browser
+  in a run, the app joins that connection as an idle client of its own and keeps it open.
+  Follow-up prompts and other sessions then share the same connection and tabs, and the
+  Welcome tab appears once, not per prompt. If the browser goes away (for example, you quit
+  it), the next prompt that uses it reconnects.
+- **Settings:** the app passes the `env` of `~/.claude/settings.json` (such as the extension
+  token) to that server, without your Anthropic key.
 
 Brave: Playwright officially supports only Chrome and Edge. The Brave option points Playwright
 at the Brave binary (`PLAYWRIGHT_MCP_EXECUTABLE_PATH`), and it works with Brave on macOS.
