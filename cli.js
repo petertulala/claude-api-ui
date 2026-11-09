@@ -2,8 +2,9 @@
 // claude-api-ui: a small local web UI over `claude -p` (stream-json), billed to an API key.
 //
 // Runs each prompt as `claude -p --output-format stream-json --verbose
-// --include-partial-messages [--resume <id>] ...` and streams the events to a browser page
-// over Server-Sent Events. Node.js standard library only.
+// --include-partial-messages --input-format stream-json [--resume <id>] ...`, writes the
+// prompt to stdin as a user message (more can follow mid-turn: steering), and streams the
+// events to a browser page over Server-Sent Events. Node.js standard library only.
 "use strict";
 
 const crypto = require("crypto");
@@ -28,6 +29,12 @@ const RUNS = new Map(); // run id -> Run
 
 // Key sources that mean "billed to the API key", as reported by the init event.
 const API_KEY_SOURCES = new Set(["ANTHROPIC_API_KEY", "apiKeyHelper"]);
+// Name of claude's built-in Claude in Chrome MCP server, as listed in the init event.
+const CHROME_MCP = "claude-in-chrome";
+const BRAVE_BIN = process.platform === "darwin"
+  ? "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+  : process.platform === "win32" ? "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+  : "/usr/bin/brave-browser";
 
 // ---------- helpers ---------------------------------------------------------
 
@@ -111,7 +118,8 @@ function shellSplit(s) {
 function buildArgv(o) {
   const argv = [CLAUDE_BIN, "-p", "--output-format", "stream-json", "--verbose"];
   if (o.partial ?? true) argv.push("--include-partial-messages");
-  if (o.images && o.images.length) argv.push("--input-format", "stream-json"); // images need a message, not text
+  // Messages, not plain text: they can carry images, and stdin can stay open for steering.
+  argv.push("--input-format", "stream-json");
   if (o.session_id) {
     argv.push("--resume", String(o.session_id));
     if (o.fork) argv.push("--fork-session");
@@ -125,11 +133,19 @@ function buildArgv(o) {
   const browser = String(o.browser || "");
   if (browser === "chrome") {
     argv.push("--chrome"); // the Claude in Chrome extension, driving your own Chrome window
-    allow.push("mcp__claude-in-chrome");
-  } else if (browser === "playwright" || browser === "playwright-headless") {
+    allow.push("mcp__" + CHROME_MCP);
+  } else if (browser.startsWith("playwright")) {
     const args = ["-y", "@playwright/mcp@latest"];
     if (browser === "playwright-headless") args.push("--headless");
-    argv.push("--mcp-config", JSON.stringify({ mcpServers: { playwright: { command: "npx", args } } }));
+    // Attach to your running Chrome (its tabs, profile and logins) through the Playwright
+    // extension, instead of launching a separate browser with an empty profile.
+    const server = { command: "npx", args };
+    if (browser.startsWith("playwright-extension")) args.push("--extension");
+    // Other Chromium browsers: point Playwright at the browser's binary, so it looks for the
+    // extension in that browser instead of Google Chrome.
+    if (browser === "playwright-extension-brave")
+      server.env = { PLAYWRIGHT_MCP_EXECUTABLE_PATH: BRAVE_BIN };
+    argv.push("--mcp-config", JSON.stringify({ mcpServers: { playwright: server } }));
     allow.push("mcp__playwright");
   }
   const tools = [String(o.allowed_tools || "").trim(), ...allow].filter(Boolean).join(" ");
@@ -218,7 +234,7 @@ function sessionHistory(cwd, sid) {
 // ---------- runs ------------------------------------------------------------
 
 class Run {
-  constructor(id, argv, cwd, prompt, env, requireApiKey, resumeId) {
+  constructor(id, argv, cwd, prompt, env, requireApiKey, resumeId, browser) {
     this.id = id;
     this.savedCosts = savedSessionCosts(); // before spawn: what claude may restore
     this.resumeId = resumeId || null;
@@ -228,11 +244,15 @@ class Run {
     this.done = false;
     this.stopped = false;
     this.requireApiKey = requireApiKey;
+    this.browser = browser || "";
     // detached: own process group, so Stop also kills the tools claude started.
     this.proc = spawn(argv[0], argv.slice(1), { cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     this.proc.on("error", e => this.push("stderr", `[gui] cannot run ${argv[0]}: ${e.message}`));
     this.proc.stdin.on("error", () => {});
-    this.proc.stdin.end(prompt);
+    // stdin stays open while the turn runs so the user can steer (POST /api/steer); it is
+    // closed on the first result, after which claude finishes what it has read and exits.
+    this.inputOpen = true;
+    this.proc.stdin.write(prompt);
     readline.createInterface({ input: this.proc.stdout, crlfDelay: Infinity }).on("line", line => {
       if (!line) return;
       let obj;
@@ -240,6 +260,7 @@ class Run {
       this.guard(obj);
       this.accountCost(obj);
       this.push("event", obj);
+      if (obj.type === "result") this.endInput();
     });
     readline.createInterface({ input: this.proc.stderr, crlfDelay: Infinity }).on("line", line => {
       if (line) this.push("stderr", line);
@@ -267,14 +288,26 @@ class Run {
     }
   }
 
-  // Stop the run if it is not billed to the API key and the user required that.
+  // Checks on the init event, before the model has done anything.
   guard(obj) {
-    if (!this.requireApiKey || obj.type !== "system" || obj.subtype !== "init") return;
+    if (obj.type !== "system" || obj.subtype !== "init") return;
+    // Not billed to the API key, and the user required that.
     const src = obj.apiKeySource;
-    if (!API_KEY_SOURCES.has(src)) {
+    if (this.requireApiKey && !API_KEY_SOURCES.has(src)) {
       this.push("stderr", `[gui] apiKeySource is ${JSON.stringify(src)}, not an API key — stopping ` +
                           "(untick 'Require API key' to allow this).");
-      this.stop();
+      return this.stop();
+    }
+    // Claude in Chrome was chosen but claude didn't load it. Without its tools Claude falls back
+    // to shell commands like `open -na "Google Chrome"`, which can start a second Chrome with an
+    // empty profile instead of using your windows, so stop instead.
+    if (this.browser === "chrome" && !(obj.mcp_servers || []).some(m => m && m.name === CHROME_MCP)) {
+      this.push("stderr", "[gui] Claude in Chrome did not load, so the run was stopped before Claude " +
+        "could start a separate Chrome. Claude Code turns Claude in Chrome on only for sessions on a " +
+        "claude.ai account, not for runs billed to an API key. To have Claude use your own Chrome " +
+        "windows with the API key, pick Settings → Browser → \"Your Chrome (Playwright extension)\" " +
+        "and install the Playwright extension in that Chrome profile.");
+      return this.stop();
     }
   }
 
@@ -286,9 +319,23 @@ class Run {
     } catch {}
   }
 
+  // Write one more user message into the running turn. False once input is closed.
+  steer(line) {
+    if (!this.inputOpen || this.done || this.stopped) return false;
+    this.proc.stdin.write(line);
+    return true;
+  }
+
+  endInput() {
+    if (!this.inputOpen) return;
+    this.inputOpen = false;
+    try { this.proc.stdin.end(); } catch {}
+  }
+
   stop() {
     if (this.stopped) return;
     this.stopped = true;
+    this.endInput();
     this.killGroup("SIGTERM");
     setTimeout(() => this.killGroup("SIGKILL"), 3000).unref();
   }
@@ -398,7 +445,7 @@ async function handle(req, res, defaultCwd) {
       try { images = checkImages(o.images); } catch (e) { return sendJson(res, { error: e.message }, 400); }
       if (!prompt.trim() && !images.length) return sendJson(res, { error: "empty prompt" }, 400);
       o.images = images;
-      if (images.length) prompt = userMessageLine(prompt, images);
+      prompt = userMessageLine(prompt, images);
       const [env, src] = apiKeyEnv();
       const require = o.require_api_key ?? true;
       if (require && !src)
@@ -408,10 +455,20 @@ async function handle(req, res, defaultCwd) {
       try { argv = buildArgv(o); } catch (e) { return sendJson(res, { error: `extra args: ${e.message}` }, 400); }
       const id = crypto.randomBytes(8).toString("hex");
       let run;
-      try { run = new Run(id, argv, cwd, prompt, env, !!require, o.session_id); }
+      try { run = new Run(id, argv, cwd, prompt, env, !!require, o.session_id, o.browser); }
       catch (e) { return sendJson(res, { error: `cannot start ${CLAUDE_BIN}: ${e.message}` }, 500); }
       RUNS.set(id, run);
-      return sendJson(res, { run_id: id, argv, cwd });
+      return sendJson(res, { run_id: id, argv, cwd, images: images.length });
+    }
+    if (p.startsWith("/api/steer/")) {
+      const run = RUNS.get(p.split("/").pop());
+      if (!run) return sendJson(res, { error: "unknown run" }, 404);
+      let o, images;
+      try { o = await readBody(req); images = checkImages(o.images); }
+      catch (e) { return sendJson(res, { error: e.message }, 400); }
+      const text = String(o.prompt || "");
+      if (!text.trim() && !images.length) return sendJson(res, { error: "empty prompt" }, 400);
+      return sendJson(res, { ok: run.steer(userMessageLine(text, images)), images: images.length });
     }
     if (p.startsWith("/api/stop/")) {
       const run = RUNS.get(p.split("/").pop());

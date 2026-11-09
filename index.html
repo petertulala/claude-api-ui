@@ -103,7 +103,9 @@
   </select></label>
   <label title="Gives Claude a browser; its tools are allowed automatically">Browser <select id="browser">
     <option value="">none</option>
-    <option value="chrome">Claude in Chrome (--chrome)</option>
+    <option value="playwright-extension">Your Chrome (Playwright extension)</option>
+    <option value="playwright-extension-brave">Your Brave (Playwright extension)</option>
+    <option value="chrome">Claude in Chrome (--chrome; claude.ai login only, not with an API key)</option>
     <option value="playwright">Playwright MCP (visible window)</option>
     <option value="playwright-headless">Playwright MCP (headless)</option>
   </select></label>
@@ -380,8 +382,10 @@ $("newSession").onclick = newSession;
 $("cwd").addEventListener("change", () => { localStorage.setItem("cpg.cwd", $("cwd").value); newSession(); refreshSessions(); });
 
 // ---------- running ----------
+const PLACEHOLDER = $("prompt").placeholder;
 function setRunning(on) {
-  $("send").disabled = on; $("stop").disabled = !on;
+  $("stop").disabled = !on;
+  $("prompt").placeholder = on ? "Claude is working. Type to steer it: Enter sends this into the running turn (Esc stops)" : PLACEHOLDER;
   clearInterval(state.timer);
   if (on) {
     state.started = Date.now(); state.statusText = "starting…"; state.thinkingTokens = 0;
@@ -450,17 +454,32 @@ $("prompt").addEventListener("drop", e => {
   e.preventDefault(); addImageFiles([...e.dataTransfer.files]);
 });
 
+state.queued = []; // messages that missed the running turn; sent as the next prompt when it ends
 async function send() {
   const prompt = $("prompt").value;
   const images = state.images.map(({ media_type, data }) => ({ media_type, data }));
-  if ((!prompt.trim() && !images.length) || state.runId) return;
+  if (!prompt.trim() && !images.length) return;
+  $("prompt").value = ""; autosize();
+  state.images = []; renderAttachments();
+  if (state.runId) return steer(prompt, images);
+  return startRun(prompt, images);
+}
+// Mid-run message: written into the running claude's stdin, or queued if that has closed.
+async function steer(prompt, images) {
+  renderUserPrompt(prompt, images);
+  const note = add(div("meta", "↳ sending into the running turn…"));
+  const r = await api("/api/steer/" + state.runId, { method: "POST", body: JSON.stringify({ prompt, images }) });
+  if (r.ok && images.length && r.images !== images.length) note.textContent = "↳ the server did not take the image(s); restart it and resend";
+  else if (r.ok) note.textContent = "↳ sent while Claude was working; it is picked up from here";
+  else if (r.error && r.error !== "unknown run") note.textContent = "↳ " + r.error;
+  else { state.queued.push({ prompt, images }); note.textContent = "↳ this turn has finished; queued as the next prompt"; }
+}
+async function startRun(prompt, images, render = true) {
   if (!state.sessionCwd) lockCwd($("cwd").value);
   const body = { prompt, images, cwd: state.sessionCwd, session_id: state.sessionId };
   for (const k of SETTINGS) { const el = $(k); body[k === "cont" ? "continue" : k] = el.type === "checkbox" ? el.checked : el.value; }
   if (state.sessionId) body.continue = false;
-  renderUserPrompt(prompt, images);
-  $("prompt").value = ""; autosize();
-  state.images = []; renderAttachments();
+  if (render) renderUserPrompt(prompt, images);
   $("status").textContent = "starting…";
   const r = await api("/api/run", { method: "POST", body: JSON.stringify(body) });
   if (r.error) {
@@ -469,6 +488,10 @@ async function send() {
     return;
   }
   if (!state.sessionId) lockCwd(r.cwd);  // show the normalized path the server actually used
+  // A server older than this page ignores images without an error; say so instead of losing them.
+  if (images.length && r.images !== images.length)
+    add(div("stderr", "The server did not take the attached image(s): it is older than this page. " +
+                      "Restart it (Ctrl+C, then run claude-api-ui again) and resend."));
   const cmd = div("cmd"); cmd.textContent = "$ " + r.argv.map(a => /[^\w@%+=:,./-]/.test(a) ? "'" + a.replace(/'/g, "'\\''") + "'" : a).join(" ") + "  (cwd " + r.cwd + ")";
   add(cmd);
   state.runId = r.run_id; setRunning(true);
@@ -479,15 +502,24 @@ async function send() {
   es.addEventListener("exit", m => {
     const code = JSON.parse(m.data);
     if (code !== 0) add(div("stderr", `claude exited with code ${code}`));
-    finish(code === 0 ? "ready" : `exited ${code}`);
+    finish(code === 0 ? "ready" : `exited ${code}`, code === 0);
   });
-  es.onerror = () => finish("stream closed");
+  es.onerror = () => finish("stream closed", false);
 }
-function finish(msg) {
+function finish(msg, ok) {
   if (state.es) state.es.close();
   state.es = null; state.runId = null; setRunning(false);
   if (!state.sessionId) unlockCwd();  // run ended before a session was created
   $("status").textContent = msg; refreshSessions(); $("prompt").focus();
+  const q = state.queued; state.queued = [];
+  if (!q.length) return;
+  const prompt = q.map(m => m.prompt).filter(t => t.trim()).join("\n\n"), images = q.flatMap(m => m.images);
+  if (ok) { add(div("meta", "↳ sending the queued message(s)")); startRun(prompt, images, false); }
+  else {  // stopped or failed: hand them back instead of running them
+    $("prompt").value = prompt; autosize();
+    state.images = images; renderAttachments();
+    add(div("meta", "↳ run ended; your queued message is back in the prompt box"));
+  }
 }
 function stop() { if (state.runId) api("/api/stop/" + state.runId, { method: "POST" }); }
 $("send").onclick = send;

@@ -76,8 +76,11 @@ It prints a URL like `http://127.0.0.1:8765/?t=<token>` and opens it in your bro
 Each prompt runs:
 
     claude -p --output-format stream-json --verbose --include-partial-messages \
+           --input-format stream-json \
            [--resume <session-id>] [--model …] [--effort …] [--permission-mode …] \
-           [--allowedTools …] [--max-budget-usd …] [extra args]  < prompt
+           [--allowedTools …] [--max-budget-usd …] [extra args]
+
+with the prompt written to stdin as a stream-json user message (see Steering).
 
 The exact command is shown above each answer.
 
@@ -126,24 +129,85 @@ copied from a spreadsheet), the text is pasted instead. Images whose longer side
 1568 px are scaled down first; the API would shrink them anyway, and smaller images cost fewer
 input tokens. PNG, JPEG, GIF and WebP are accepted, up to 20 per prompt.
 
-A prompt with images is sent as one stream-json user message (`--input-format stream-json`)
-with image blocks. Text-only prompts still go in as plain text. Images in a resumed session's
-history are shown too.
+Images go into the user message as image blocks. Images in a resumed session's history are
+shown too.
+
+### Steering
+
+You can type while Claude is working, as in interactive Claude Code. Enter writes the message
+into the running `claude`, and the chat marks it "sent while Claude was working".
+
+How it works: every prompt is sent as a stream-json user message (`--input-format stream-json`),
+and `claude`'s stdin stays open while the turn runs, so further messages can be written into it.
+When the turn's `result` arrives, the server closes stdin so `claude` can exit. Anything already
+written is still handled before that.
+
+- **Too late for the turn:** a message sent after the turn finished, while `claude` is still
+  shutting down, is queued and sent as the next prompt (resuming the session) as soon as the
+  run ends.
+- **Stop (Esc):** queued messages are not run; they go back into the prompt box.
 
 ### Browser
 
-**Browser** (Settings) gives Claude a web browser. The tools of the chosen browser are
-pre-allowed, because `-p` can't ask for approval:
+**Browser** (Settings) gives Claude a web browser. The chosen browser's tools are
+pre-allowed, because `-p` can't ask for approval.
 
-- **Claude in Chrome**: passes `--chrome` and drives your own Chrome, with your logins,
-  through the Claude in Chrome extension. The extension must be installed and signed in.
-  Its site permissions are still asked for in Chrome itself.
-- **Playwright MCP**: loads [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp)
-  via `npx` (Node 18+). It opens its own Chrome window with a separate profile, so you start
-  logged out of everything. The headless variant shows no window.
+| Option | What Claude uses | Your logins | Billing |
+| ------ | ---------------- | ----------- | ------- |
+| **Your Chrome (Playwright extension)** | your running Chrome, in new tabs | yes | API key |
+| **Your Brave (Playwright extension)** | your running Brave, in new tabs | yes | API key |
+| **Playwright MCP** (visible / headless) | a separate browser with an empty profile | no | API key |
+| **Claude in Chrome** | your Chrome, via the Claude in Chrome extension | yes | claude.ai account only (see below) |
 
-Either way, the model's tokens are billed like any other run. Screenshots and page snapshots
-are input tokens, so browser-heavy prompts cost more; use **Max $/prompt** to cap them.
+#### Use your own browser (Chrome or Brave)
+
+This lets Claude open pages in your everyday browser, with your profile and logins. It uses
+[Playwright MCP](https://github.com/microsoft/playwright-mcp) in extension mode
+(`@playwright/mcp --extension`), started with `npx`. One-time setup:
+
+1. **Install the Playwright extension** from the
+   [Chrome Web Store](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm).
+   Install it in the browser and profile you want Claude to use; it works in Brave too.
+2. **Save the extension token,** so you don't have to approve every connection. Click the
+   extension's icon and copy the value of `PLAYWRIGHT_MCP_EXTENSION_TOKEN`. Then add it to the
+   `env` section of `~/.claude/settings.json`; `claude` passes it on to Playwright:
+   ```json
+   { "env": { "PLAYWRIGHT_MCP_EXTENSION_TOKEN": "…" } }
+   ```
+   Don't put it in **Extra args**, which is shown in the command line above each answer.
+3. **macOS: allow access to browser data.** Playwright reads your browser's profile folder to
+   find the extension, and macOS blocks that for Terminal apps by default (`Operation not
+   permitted`, or "Playwright Extension not found"). Open **System Settings → Privacy &
+   Security → Full Disk Access**, turn on the terminal app you start `claude-api-ui` from, then
+   quit and reopen it. Full Disk Access is broad, so turn it off again if you stop using this.
+4. **Restart `claude-api-ui`** and choose **Settings → Browser → Your Chrome** or **Your Brave**.
+   It must match the browser where you installed the extension.
+
+Then keep that browser open and ask, for example, "Open https://example.com in a new tab
+and tell me the title." Each run opens the extension's **Welcome** tab to connect; with the
+token saved it connects without asking, and you can close that tab. Without the token, click
+the button on the Welcome page to allow the connection. Until you do, Claude's browser calls
+wait.
+
+Brave: Playwright officially supports only Chrome and Edge. The Brave option points Playwright
+at the Brave binary (`PLAYWRIGHT_MCP_EXECUTABLE_PATH`), and it works with Brave on macOS.
+
+#### Claude in Chrome
+
+**Claude in Chrome** passes `--chrome`, so Claude Code uses its own Claude in Chrome extension.
+Claude Code enables it only for sessions on a claude.ai account, not for runs billed to an API
+key, so it doesn't load in this app with an API key. The app then stops the run at startup.
+Otherwise Claude would fall back to shell commands such as `open -na "Google Chrome"`, which can
+open a second Chrome with an empty profile. Use **Your Chrome** instead.
+
+#### Notes
+
+- Page snapshots are saved in `.playwright-mcp/` in the working directory, and they contain
+  page content. Add `.playwright-mcp/` to your projects' `.gitignore`.
+- Screenshots and page snapshots count as input tokens, so browser-heavy prompts cost more.
+  Use **Max $/prompt** to cap them.
+- Claude acts in your real, logged-in browser. Only point it at sites and tasks you'd be happy
+  for it to act on as you.
 
 ### Other settings
 
