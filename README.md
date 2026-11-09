@@ -4,12 +4,12 @@ A small local web UI for [Claude Code](https://code.claude.com) in headless mode
 billed to your **Anthropic API key** (Console credits) instead of a Claude subscription.
 
 It gives you a chat window in the browser that streams Claude's answers, tool calls and
-results live, resumes earlier sessions, and shows what each prompt cost. It is one Python file
-and one HTML file with no dependencies to install.
+results live, resumes earlier sessions, and shows what each prompt cost. It has no
+dependencies: one Node.js script and one HTML page.
 
 ## Requirements
 
-- **Python 3.8+**, standard library only.
+- **Node.js 18+**
 - **Claude Code** installed with `claude` on your `PATH`, or set `CLAUDE_BIN=/path/to/claude`.
 - An **Anthropic API key** from the [Claude Console](https://platform.claude.com).
 - macOS or Linux. Windows is untested.
@@ -17,14 +17,17 @@ and one HTML file with no dependencies to install.
 ## Install
 
 ```sh
-git clone https://github.com/petertulala/claude-api-ui.git
-cd claude-api-ui
+npm install -g claude-api-ui
 ```
 
-Optionally put the launcher on your `PATH`:
+Or run it without installing: `npx claude-api-ui`.
+
+From source:
 
 ```sh
-ln -s "$PWD/claude-api-ui" ~/.local/bin/claude-api-ui
+git clone https://github.com/petertulala/claude-api-ui.git
+cd claude-api-ui
+npm link          # puts `claude-api-ui` on your PATH; or run `node cli.js`
 ```
 
 ## Set your API key
@@ -51,16 +54,17 @@ Run it from the project directory you want Claude to work in:
 
 ```sh
 cd ~/path/to/your/project
-claude-api-ui                     # or: /path/to/claude-api-ui/claude-api-ui
+claude-api-ui
 ```
 
 It prints a URL like `http://127.0.0.1:8765/?t=<token>` and opens it in your browser.
 
 | Option         | Meaning                                                  |
 | -------------- | -------------------------------------------------------- |
-| `--cwd DIR`    | Default working directory (the launcher passes `$PWD`)   |
+| `--cwd DIR`    | Default working directory (default: current directory)   |
 | `--port N`     | Port to listen on (default 8765, or the next free port)  |
 | `--no-browser` | Don't open the browser, just print the URL               |
+| `--version`    | Print the version                                        |
 
 ## Using it
 

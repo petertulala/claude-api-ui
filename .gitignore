@@ -3,3 +3,5 @@ __pycache__/
 .DS_Store
 api_key
 .env
+node_modules/
+*.tgz
