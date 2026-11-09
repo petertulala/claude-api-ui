@@ -110,10 +110,14 @@ group, including tools) · Cmd/Ctrl+K starts a new session.
 - **Require API key** (Settings, on by default) refuses to start without a key and stops any run
   that would be billed some other way, such as a logged-in subscription.
 - **Max $/prompt** maps to `--max-budget-usd`.
-- Each answer shows the cost of that prompt alone. When `claude` resumes the session it saved
-  last, it restores that session's cost (`lastCost` in `~/.claude.json`), so `total_cost_usd`
-  becomes the session total. The server subtracts what was saved before the run. The session
-  total is shown in brackets.
+- Each answer shows the cost of that prompt alone, with the session total in brackets.
+  `total_cost_usd` is a running total. When `claude` resumes a session, it starts from the
+  cost saved in that session's file (its last `cost-state` record), and a run with steering
+  reports one result per turn. The server reads the saved cost before each run and counts only
+  the increase since the previous total.
+- With an API key, the app runs `claude` with `disableClaudeAiConnectors`. claude.ai
+  connectors can't load with an API key anyway, and this removes the notice saying so that
+  `claude` would otherwise print on every prompt.
 - The **spent** badge adds up the cost of the prompts run in the current browser tab. It is not
   your account balance; the API doesn't expose that, so **balance ↗** links to the Console
   billing page.

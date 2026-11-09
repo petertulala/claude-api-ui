@@ -54,17 +54,33 @@ function which(cmd) {
 function isDir(p) { try { return fs.statSync(p).isDirectory(); } catch { return false; } }
 function isFile(p) { try { return fs.statSync(p).isFile(); } catch { return false; } }
 
-// Session id -> cost claude saved for it (projects[*].lastCost/lastSessionId in ~/.claude.json).
-// Resuming the session that saved last restores that cost, so the run's result.total_cost_usd
-// is the whole session's total, not this run's. Snapshot before spawning to subtract it.
-function savedSessionCosts() {
-  const out = new Map();
-  try {
-    const d = JSON.parse(fs.readFileSync(CLAUDE_JSON, "utf8"));
-    for (const v of Object.values(d.projects || {}))
-      if (v && v.lastSessionId && typeof v.lastCost === "number") out.set(v.lastSessionId, v.lastCost);
-  } catch {}
-  return out;
+// Cost claude has saved for a session: the last "cost-state" record (totalCostUSD) in the
+// session's file. Resuming a session restores that total, so result.total_cost_usd of a resumed
+// run is the whole session's cost so far, not this run's. Read it before spawning, to subtract.
+// Only the end of the file is read; the record follows every run.
+function savedSessionCost(cwd, sid) {
+  const f = sid && sessionFile(cwd, sid);
+  if (!f) return 0;
+  const size = fs.statSync(f).size;
+  for (const bytes of [2 * 1024 * 1024, size]) {
+    const fd = fs.openSync(f, "r");
+    let text;
+    try {
+      const n = Math.min(bytes, size), buf = Buffer.alloc(n);
+      fs.readSync(fd, buf, 0, n, size - n);
+      text = buf.toString("utf8");
+    } finally { fs.closeSync(fd); }
+    const lines = text.split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"cost-state"')) continue;
+      try {
+        const o = JSON.parse(lines[i]);
+        if (o.type === "cost-state" && typeof o.totalCostUSD === "number") return o.totalCostUSD;
+      } catch {}
+    }
+    if (bytes >= size) break;
+  }
+  return 0;
 }
 
 function claudeSettings() {
@@ -142,6 +158,10 @@ function buildArgv(o) {
     argv.push("--mcp-config", JSON.stringify({ mcpServers: { playwright: { type: "http", url: o.playwright_url } } }));
     allow.push("mcp__playwright");
   }
+  // With an API key, claude.ai connectors can't load anyway, and claude says so on every run
+  // ("claude.ai connectors are disabled because ANTHROPIC_API_KEY ..."). Turn them off for these
+  // runs only, which also removes that notice. Without a key they stay as configured.
+  if (o.api_key_source) argv.push("--settings", JSON.stringify({ disableClaudeAiConnectors: true }));
   const tools = [String(o.allowed_tools || "").trim(), ...allow].filter(Boolean).join(" ");
   if (tools) argv.push("--allowedTools", tools);
   if (o.max_budget) argv.push("--max-budget-usd", String(o.max_budget));
@@ -477,10 +497,10 @@ function stopPlaywright() { for (const e of PLAYWRIGHT.values()) killGroup(e.pro
 
 class Run {
   constructor(id, argv, cwd, prompt, env, requireApiKey, resumeId, browser) {
+    // Before spawn: the total claude will restore when resuming (see savedSessionCost).
+    try { this.lastTotal = savedSessionCost(cwd, resumeId); } catch { this.lastTotal = 0; }
     this.id = id;
-    this.savedCosts = savedSessionCosts(); // before spawn: what claude may restore
     this.resumeId = resumeId || null;
-    this.baseline = 0;
     this.events = []; // [kind, payload]
     this.listeners = new Set();
     this.done = false;
@@ -520,15 +540,16 @@ class Run {
     for (const l of this.listeners) l([kind, payload]);
   }
 
-  // Adds run_cost_usd (this run alone) to the result event; see savedSessionCosts().
+  // Adds run_cost_usd to each result event: the cost since the previous total. total_cost_usd is
+  // a running total: it starts from the session's saved cost when resuming, and a run with
+  // steering reports one result per turn, each including the earlier ones.
   accountCost(obj) {
-    if (obj.type === "system" && obj.subtype === "init") {
-      this.baseline = this.savedCosts.get(obj.session_id) ?? this.savedCosts.get(this.resumeId) ?? 0;
-    } else if (obj.type === "result" && typeof obj.total_cost_usd === "number") {
-      const t = obj.total_cost_usd;
-      obj.run_cost_usd = t >= this.baseline ? t - this.baseline : t; // below baseline = nothing restored
-    }
+    if (obj.type !== "result" || typeof obj.total_cost_usd !== "number") return;
+    const t = obj.total_cost_usd;
+    obj.run_cost_usd = t >= this.lastTotal ? t - this.lastTotal : t; // lower = nothing was restored
+    this.lastTotal = t;
   }
+
 
   // Checks on the init event, before the model has done anything.
   guard(obj) {
@@ -699,6 +720,7 @@ async function handle(req, res, defaultCwd) {
         try { o.playwright_url = await ensurePlaywright(String(o.browser)); }
         catch (e) { return sendJson(res, { error: e.message }, 500); }
       }
+      o.api_key_source = src;
       let argv;
       try { argv = buildArgv(o); } catch (e) { return sendJson(res, { error: `extra args: ${e.message}` }, 400); }
       const id = crypto.randomBytes(8).toString("hex");
