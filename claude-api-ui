@@ -1,0 +1,3 @@
+#!/bin/sh
+# Launch claude-api-ui with the current directory as the default working directory.
+exec python3 "$(dirname "$(realpath "$0")")/app.py" --cwd "$PWD" "$@"

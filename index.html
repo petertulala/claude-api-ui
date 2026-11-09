@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-api-ui</title>
+<style>
+  :root {
+    --bg:#1a1a18; --panel:#232320; --line:#34342f; --fg:#e8e6df; --dim:#9a988f;
+    --accent:#d97757; --ok:#7fb069; --warn:#e0b04a; --err:#e06c6c; --code:#2b2b27;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size:14px;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
+  header input, header select, .settings input, .settings select {
+    background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 7px; font:inherit;
+  }
+  #cwd { width:320px; font-family:ui-monospace, Menlo, monospace; font-size:12px; }
+  #sessions { max-width:320px; }
+  #cwd[readonly] { opacity:.6; cursor:not-allowed; }
+  button { background:var(--code); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--dim); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.45; cursor:default; }
+  .badge { font-size:12px; padding:3px 8px; border-radius:10px; border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
+  .badge.ok { color:var(--ok); border-color:var(--ok); }
+  .badge.warn { color:var(--warn); border-color:var(--warn); }
+  .badge.err { color:var(--err); border-color:var(--err); }
+  .spacer { flex:1; }
+  .settings { display:none; gap:10px 16px; padding:10px 12px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; align-items:center; font-size:13px; }
+  .settings.open { display:flex; }
+  .settings label { display:flex; gap:6px; align-items:center; color:var(--dim); }
+  #log { flex:1; overflow-y:auto; padding:16px 0; }
+  .wrap { max-width:900px; margin:0 auto; padding:0 16px; }
+  .msg { margin:10px 0; line-height:1.5; }
+  .user { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px 12px; white-space:pre-wrap; }
+  .user::before { content:"> "; color:var(--accent); font-weight:bold; }
+  .text p { margin:.4em 0; }
+  .text pre { background:var(--code); padding:10px; border-radius:6px; overflow-x:auto; }
+  .text code { font-family:ui-monospace, Menlo, monospace; font-size:12.5px; background:var(--code); padding:1px 4px; border-radius:4px; }
+  .text pre code { padding:0; background:none; }
+  .text a { color:var(--accent); }
+  .text h1, .text h2, .text h3, .text h4 { margin:.7em 0 .3em; font-size:1.05em; }
+  .text table { border-collapse:collapse; margin:.4em 0; }
+  .text td, .text th { border:1px solid var(--line); padding:3px 8px; }
+  .text blockquote { border-left:3px solid var(--line); margin:.4em 0; padding-left:10px; color:var(--dim); }
+  .thinking { color:var(--dim); font-style:italic; border-left:2px solid var(--line); padding-left:10px; white-space:pre-wrap; font-size:13px; }
+  details.tool { border:1px solid var(--line); border-radius:8px; background:var(--panel); font-size:13px; }
+  details.tool > summary { padding:6px 10px; cursor:pointer; list-style:none; display:flex; gap:8px; align-items:baseline; }
+  details.tool > summary::before { content:"●"; color:var(--warn); }
+  details.tool.done > summary::before { color:var(--ok); }
+  details.tool.error > summary::before { color:var(--err); }
+  details.tool .name { font-weight:600; }
+  details.tool .arg { font-family:ui-monospace, Menlo, monospace; font-size:12px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  details.tool pre { margin:0; padding:8px 10px; border-top:1px solid var(--line); font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:400px; overflow:auto; font-family:ui-monospace, Menlo, monospace; }
+  .sub { margin-left:22px; opacity:.85; }
+  .meta { color:var(--dim); font-size:12px; }
+  .stderr { color:var(--err); font-family:ui-monospace, Menlo, monospace; font-size:12px; white-space:pre-wrap; }
+  .raw { color:var(--dim); font-family:ui-monospace, Menlo, monospace; font-size:11px; white-space:pre-wrap; word-break:break-all; }
+  .cmd { color:var(--dim); font-family:ui-monospace, Menlo, monospace; font-size:11px; word-break:break-all; }
+  footer { border-top:1px solid var(--line); background:var(--panel); padding:10px 12px; }
+  footer .wrap { display:flex; gap:8px; align-items:flex-end; }
+  #prompt { flex:1; resize:none; min-height:44px; max-height:40vh; background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:10px; font:inherit; }
+  #prompt:focus { outline:none; border-color:var(--accent); }
+  #status { font-size:12px; color:var(--dim); margin-top:6px; }
+  .spin { display:inline-block; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <strong style="color:var(--accent)">claude -p</strong>
+  <input id="cwd" title="Working directory" placeholder="working directory">
+  <select id="sessions" title="Resume a stored session in this directory"></select>
+  <button id="newSession" title="Start a fresh session (Cmd+K)">New</button>
+  <span id="sessBadge" class="badge">new session</span>
+  <span class="spacer"></span>
+  <span id="authBadge" class="badge">auth: ?</span>
+  <span id="costBadge" class="badge" title="Spent by prompts run from this browser tab (sum of result.total_cost_usd). Not your account balance; the API does not expose that.">spent $0.0000</span>
+  <a class="badge" href="https://platform.claude.com/settings/billing" target="_blank" rel="noopener" title="Your remaining credit balance is on the Claude Console billing page">balance ↗</a>
+  <button id="toggleSettings">Settings</button>
+</header>
+<div class="settings" id="settings">
+  <label>Model <input id="model" list="models" placeholder="default" size="16"></label>
+  <datalist id="models"><option value="opus"><option value="sonnet"><option value="haiku"><option value="claude-opus-5-5"><option value="claude-sonnet-5-5"><option value="claude-haiku-5-5"></datalist>
+  <label>Effort <select id="effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+  <label>Permissions <select id="permission_mode">
+    <option value="">default (unapproved tools are denied)</option>
+    <option value="acceptEdits">acceptEdits</option>
+    <option value="plan">plan</option>
+    <option value="auto">auto</option>
+    <option value="bypassPermissions">bypassPermissions</option>
+  </select></label>
+  <label>Allowed tools <input id="allowed_tools" placeholder='e.g. Bash(git *) Edit Read' size="24"></label>
+  <label>Max $/prompt <input id="max_budget" type="number" step="0.5" min="0" placeholder="none" style="width:70px"></label>
+  <label>Extra args <input id="extra_args" placeholder="--add-dir ../x" size="22"></label>
+  <label><input type="checkbox" id="partial" checked> stream partial messages</label>
+  <label title="If no session is selected, pass --continue (most recent session in this directory)"><input type="checkbox" id="cont"> --continue when new</label>
+  <label title="Pass --fork-session when resuming"><input type="checkbox" id="fork"> fork on resume</label>
+  <label title="Refuse to run without ANTHROPIC_API_KEY and stop any run whose apiKeySource is not an API key"><input type="checkbox" id="require_api_key" checked> require API key</label>
+  <label><input type="checkbox" id="showRaw"> show raw events</label>
+</div>
+<div id="log"><div class="wrap" id="logInner"></div></div>
+<footer>
+  <div class="wrap">
+    <textarea id="prompt" rows="2" placeholder="Ask Claude…  (Enter to send, Shift+Enter for newline, Esc to stop)"></textarea>
+    <button id="send" class="primary">Send</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+  <div class="wrap"><div id="status">ready</div></div>
+</footer>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = id => document.getElementById(id);
+const api = (path, opts = {}) => fetch(path, { ...opts, headers: { "X-Token": TOKEN, "Content-Type": "application/json", ...(opts.headers || {}) } }).then(r => r.json());
+
+const SETTINGS = ["model","effort","permission_mode","allowed_tools","max_budget","extra_args","partial","cont","fork","require_api_key","showRaw"];
+// system event subtypes worth a line in the chat; the rest are progress/bookkeeping.
+const SHOWN_SYSTEM = new Set(["api_retry", "api_error", "compact_boundary", "informational"]);
+const state = { sessionId: null, runId: null, es: null, cost: 0, tools: {}, streamed: new Set(), blocks: {}, curMsgId: null, started: 0, timer: null };
+
+// ---------- settings persistence ----------
+function loadSettings() {
+  const s = JSON.parse(localStorage.getItem("cpg.settings") || "{}");
+  for (const k of SETTINGS) if (k in s) { const el = $(k); el.type === "checkbox" ? el.checked = s[k] : el.value = s[k]; }
+}
+function saveSettings() {
+  const s = {};
+  for (const k of SETTINGS) { const el = $(k); s[k] = el.type === "checkbox" ? el.checked : el.value; }
+  localStorage.setItem("cpg.settings", JSON.stringify(s));
+}
+SETTINGS.forEach(k => $(k).addEventListener("change", saveSettings));
+$("toggleSettings").onclick = () => $("settings").classList.toggle("open");
+
+// ---------- tiny markdown ----------
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function inline(s) {
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+  s = esc(s)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => "<code>" + esc(codes[i]) + "</code>");
+}
+function md(src) {
+  const lines = src.split("\n"); let out = "", i = 0;
+  while (i < lines.length) {
+    let l = lines[i];
+    const fence = l.match(/^\s*```(\S*)/);
+    if (fence) {
+      const buf = []; i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i++]);
+      i++; out += "<pre><code>" + esc(buf.join("\n")) + "</code></pre>"; continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      const row = (r, t) => "<tr>" + r.trim().replace(/^\||\|$/g, "").split("|").map(c => `<${t}>${inline(c.trim())}</${t}>`).join("") + "</tr>";
+      out += "<table>" + row(l, "th"); i += 2;
+      while (i < lines.length && /^\s*\|/.test(lines[i])) out += row(lines[i++], "td");
+      out += "</table>"; continue;
+    }
+    const h = l.match(/^(#{1,6})\s+(.*)/);
+    if (h) { out += `<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`; i++; continue; }
+    if (/^\s*([-*+]|\d+\.)\s+/.test(l)) {
+      const ordered = /^\s*\d+\./.test(l); out += ordered ? "<ol>" : "<ul>";
+      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) out += "<li>" + inline(lines[i++].replace(/^\s*([-*+]|\d+\.)\s+/, "")) + "</li>";
+      out += ordered ? "</ol>" : "</ul>"; continue;
+    }
+    if (/^>\s?/.test(l)) {
+      const buf = []; while (i < lines.length && /^>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^>\s?/, ""));
+      out += "<blockquote>" + inline(buf.join(" ")) + "</blockquote>"; continue;
+    }
+    if (/^\s*$/.test(l)) { i++; continue; }
+    const buf = [];
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^\s*```|^#{1,6}\s|^\s*([-*+]|\d+\.)\s+|^>/.test(lines[i])) buf.push(lines[i++]);
+    if (!buf.length) buf.push(lines[i++]);
+    out += "<p>" + buf.map(inline).join("<br>") + "</p>";
+  }
+  return out;
+}
+
+// ---------- rendering ----------
+const log = $("logInner");
+const atBottom = () => { const el = $("log"); return el.scrollHeight - el.scrollTop - el.clientHeight < 40; };
+let stick = true;  // follow output unless the user scrolled up
+$("log").addEventListener("scroll", () => { stick = atBottom(); });
+const follow = () => { if (stick) $("log").scrollTop = $("log").scrollHeight; };
+function add(el, parentToolId) {
+  if (parentToolId) el.classList.add("sub");
+  log.appendChild(el);
+  follow();
+  return el;
+}
+function div(cls, html) { const d = document.createElement("div"); d.className = "msg " + cls; if (html != null) d.innerHTML = html; return d; }
+function renderText(el) {
+  el.innerHTML = md(el._src || "");
+  follow();
+}
+let pending = new Set();
+function scheduleRender(el) {
+  pending.add(el);
+  if (pending.size === 1) requestAnimationFrame(() => { pending.forEach(renderText); pending = new Set(); });
+}
+function toolArg(name, input) {
+  if (!input) return "";
+  return input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || input.prompt || JSON.stringify(input);
+}
+function renderToolUse(b, parent) {
+  if (state.tools[b.id]) return;
+  const d = document.createElement("details");
+  d.className = "msg tool";
+  d.innerHTML = `<summary><span class="name">${esc(b.name)}</span><span class="arg">${esc(String(toolArg(b.name, b.input)).slice(0, 300))}</span></summary><pre>${esc(JSON.stringify(b.input, null, 2))}</pre>`;
+  state.tools[b.id] = d;
+  add(d, parent);
+}
+function resultText(c) {
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) return c.map(x => x.type === "text" ? x.text : x.type === "image" ? "[image]" : JSON.stringify(x)).join("\n");
+  return JSON.stringify(c, null, 2);
+}
+function renderToolResult(b) {
+  const d = state.tools[b.tool_use_id];
+  let txt = resultText(b.content);
+  if (txt.length > 20000) txt = txt.slice(0, 20000) + `\n… (${txt.length - 20000} more chars)`;
+  const pre = document.createElement("pre"); pre.textContent = txt;
+  if (d) { d.classList.add(b.is_error ? "error" : "done"); d.appendChild(pre); follow(); }
+  else add(div("meta", "tool result: " + esc(txt.slice(0, 500))));
+}
+function renderUserPrompt(text) { const d = div("user"); d.textContent = text; stick = true; add(d); }
+
+function onEvent(ev) {
+  if ($("showRaw").checked) add(div("raw", esc(JSON.stringify(ev))));
+  const parent = ev.parent_tool_use_id || null;
+  switch (ev.type) {
+    case "system":
+      if (ev.subtype === "init") {
+        setSession(ev.session_id);
+        const src = ev.apiKeySource, api = src === "ANTHROPIC_API_KEY" || src === "apiKeyHelper";
+        const b = $("authBadge"); b.textContent = "auth: " + src; b.className = "badge " + (api ? "ok" : "warn");
+        b.title = api ? "Billed to your API key (Console credits)" : "NOT an API key — this run uses your subscription / login";
+        state.statusText = `${ev.model} · ${ev.permissionMode || ""} · ${ev.cwd}`;
+      } else if (ev.subtype === "thinking_tokens") {
+        // Progress estimate for (usually hidden) thinking: show it in the status line, not the log.
+        state.thinkingTokens = ev.estimated_tokens || 0;
+      } else if (SHOWN_SYSTEM.has(ev.subtype) || /^error/.test(ev.subtype || "")) {
+        add(div("meta", esc(`[${ev.subtype}] ` + (ev.message || ev.content || ""))));
+      }  // other system events (status, hooks, progress, …) only appear with "show raw"
+      break;
+    case "stream_event": {
+      const e = ev.event || {};
+      if (e.type === "message_start") { state.curMsgId = e.message && e.message.id; state.streamed.add(state.curMsgId); state.blocks = {}; state.thinkingTokens = 0; }
+      else if (e.type === "content_block_start") {
+        const t = e.content_block && e.content_block.type;
+        if (t !== "thinking") state.thinkingTokens = 0;
+        if (t === "text") state.blocks[e.index] = add(div("text"), parent);
+        else if (t === "thinking") state.blocks[e.index] = add(div("thinking"), parent);
+      } else if (e.type === "content_block_delta") {
+        const el = state.blocks[e.index]; if (!el) break;
+        if (e.delta.type === "text_delta") { el._src = (el._src || "") + e.delta.text; scheduleRender(el); }
+        else if (e.delta.type === "thinking_delta") { el.textContent += e.delta.thinking; follow(); }
+      }
+      break;
+    }
+    case "assistant": {
+      const m = ev.message || {}, streamed = state.streamed.has(m.id);
+      for (const b of m.content || []) {
+        if (b.type === "text" && !streamed) { const el = add(div("text"), parent); el._src = b.text; renderText(el); }
+        else if (b.type === "thinking" && !streamed && b.thinking) add(div("thinking"), parent).textContent = b.thinking;
+        else if (b.type === "tool_use") renderToolUse(b, parent);
+      }
+      if (ev.error) add(div("stderr", esc("API error: " + ev.error)));
+      break;
+    }
+    case "user": {
+      const c = (ev.message || {}).content;
+      if (Array.isArray(c)) for (const b of c) if (b.type === "tool_result") renderToolResult(b);
+      break;
+    }
+    case "result": {
+      setSession(ev.session_id);
+      if (typeof ev.total_cost_usd === "number") { state.cost += ev.total_cost_usd; $("costBadge").textContent = "spent $" + state.cost.toFixed(4); }
+      const u = ev.usage || {};
+      const tok = `in ${u.input_tokens ?? "?"} · cache r/w ${u.cache_read_input_tokens ?? 0}/${u.cache_creation_input_tokens ?? 0} · out ${u.output_tokens ?? "?"}`;
+      const ok = !ev.is_error;
+      add(div("meta", `${ok ? "✓" : "✗ " + esc(ev.subtype)} · ${(ev.duration_ms / 1000).toFixed(1)}s · ${ev.num_turns} turns · $${(ev.total_cost_usd || 0).toFixed(4)} · ${tok}`));
+      if (!ok && ev.result) add(div("stderr", esc(ev.result)));
+      if (ev.permission_denials && ev.permission_denials.length)
+        add(div("meta", "⚠ denied tools: " + esc(ev.permission_denials.map(d => d.tool_name).join(", ")) + " — allow them in Settings (Allowed tools / Permissions) and ask again."));
+      break;
+    }
+  }
+}
+
+// ---------- sessions ----------
+// The working directory belongs to the session: it is fixed from the first prompt (or a resume)
+// until "New" starts another session.
+function lockCwd(cwd) {
+  state.sessionCwd = cwd; $("cwd").value = cwd; $("cwd").readOnly = true;
+  $("cwd").title = "Working directory of this session (locked). Click New to start a session elsewhere.";
+}
+function unlockCwd() {
+  state.sessionCwd = null; $("cwd").readOnly = false; $("cwd").title = "Working directory";
+}
+function setSession(id) {
+  if (!id) return;
+  state.sessionId = id;
+  $("sessBadge").textContent = "session " + id.slice(0, 8);
+  $("sessBadge").title = id;
+  $("sessBadge").className = "badge ok";
+}
+function newSession() {
+  if (state.runId) return;  // can't switch sessions while a prompt is running
+  state.sessionId = null; state.tools = {}; state.streamed = new Set(); unlockCwd();
+  $("sessBadge").textContent = "new session"; $("sessBadge").className = "badge";
+  log.innerHTML = ""; $("sessions").value = ""; $("prompt").focus();
+}
+async function refreshSessions() {
+  const list = await api("/api/sessions?cwd=" + encodeURIComponent($("cwd").value));
+  const sel = $("sessions");
+  sel.innerHTML = '<option value="">— resume a session —</option>' + list.map(s =>
+    `<option value="${s.id}">${new Date(s.mtime * 1000).toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"})} · ${esc(s.title || s.id.slice(0, 8))}</option>`).join("");
+  if (state.sessionId) sel.value = state.sessionId;
+}
+$("sessions").onchange = async () => {
+  const id = $("sessions").value;
+  if (state.runId) { $("sessions").value = state.sessionId || ""; return; }
+  if (!id) return newSession();
+  const cwd = $("cwd").value;
+  newSession(); $("sessions").value = id; setSession(id); lockCwd(cwd);
+  const hist = await api(`/api/history?cwd=${encodeURIComponent(cwd)}&id=${id}`);
+  for (const h of hist) {
+    if (h.type === "user") {
+      const c = h.message.content;
+      if (typeof c === "string") { if (!c.startsWith("<")) renderUserPrompt(c); }
+      else if (Array.isArray(c)) {
+        const t = c.filter(b => b.type === "text").map(b => b.text).join("\n");
+        if (t && !t.startsWith("<")) renderUserPrompt(t);
+        c.filter(b => b.type === "tool_result").forEach(renderToolResult);
+      }
+    } else onEvent({ type: "assistant", message: { ...h.message, id: "hist-" + Math.random() } });
+  }
+  add(div("meta", "— resumed; next prompt continues this session —"));
+};
+$("newSession").onclick = newSession;
+$("cwd").addEventListener("change", () => { localStorage.setItem("cpg.cwd", $("cwd").value); newSession(); refreshSessions(); });
+
+// ---------- running ----------
+function setRunning(on) {
+  $("send").disabled = on; $("stop").disabled = !on;
+  clearInterval(state.timer);
+  if (on) {
+    state.started = Date.now(); state.statusText = "starting…"; state.thinkingTokens = 0;
+    const tick = () => { $("status").innerHTML = `<span class="spin">✻</span> ${Math.round((Date.now() - state.started) / 1000)}s · `
+      + (state.thinkingTokens ? `thinking ~${state.thinkingTokens.toLocaleString()} tok · ` : "") + esc(state.statusText); };
+    tick(); state.timer = setInterval(tick, 500);
+  }
+}
+async function send() {
+  const prompt = $("prompt").value;
+  if (!prompt.trim() || state.runId) return;
+  if (!state.sessionCwd) lockCwd($("cwd").value);
+  const body = { prompt, cwd: state.sessionCwd, session_id: state.sessionId };
+  for (const k of SETTINGS) { const el = $(k); body[k === "cont" ? "continue" : k] = el.type === "checkbox" ? el.checked : el.value; }
+  if (state.sessionId) body.continue = false;
+  renderUserPrompt(prompt);
+  $("prompt").value = ""; autosize();
+  $("status").textContent = "starting…";
+  const r = await api("/api/run", { method: "POST", body: JSON.stringify(body) });
+  if (r.error) {
+    add(div("stderr", esc(r.error))); $("status").textContent = "error";
+    if (!state.sessionId) unlockCwd();  // nothing started, so the path is still free to change
+    return;
+  }
+  if (!state.sessionId) lockCwd(r.cwd);  // show the normalized path the server actually used
+  const cmd = div("cmd"); cmd.textContent = "$ " + r.argv.map(a => /[^\w@%+=:,./-]/.test(a) ? "'" + a.replace(/'/g, "'\\''") + "'" : a).join(" ") + "  (cwd " + r.cwd + ")";
+  add(cmd);
+  state.runId = r.run_id; setRunning(true);
+  const es = new EventSource(`/api/stream/${r.run_id}?t=${TOKEN}`);
+  state.es = es;
+  es.addEventListener("event", m => onEvent(JSON.parse(m.data)));
+  es.addEventListener("stderr", m => add(div("stderr", esc(JSON.parse(m.data)))));
+  es.addEventListener("exit", m => {
+    const code = JSON.parse(m.data);
+    if (code !== 0) add(div("stderr", `claude exited with code ${code}`));
+    finish(code === 0 ? "ready" : `exited ${code}`);
+  });
+  es.onerror = () => finish("stream closed");
+}
+function finish(msg) {
+  if (state.es) state.es.close();
+  state.es = null; state.runId = null; setRunning(false);
+  if (!state.sessionId) unlockCwd();  // run ended before a session was created
+  $("status").textContent = msg; refreshSessions(); $("prompt").focus();
+}
+function stop() { if (state.runId) api("/api/stop/" + state.runId, { method: "POST" }); }
+$("send").onclick = send;
+$("stop").onclick = stop;
+function autosize() { const p = $("prompt"); p.style.height = "auto"; p.style.height = Math.min(p.scrollHeight, innerHeight * 0.4) + "px"; }
+$("prompt").addEventListener("input", autosize);
+$("prompt").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") stop();
+  if (e.key === "k" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!state.runId) newSession(); }
+});
+
+// ---------- boot ----------
+(async () => {
+  loadSettings();
+  const info = await api("/api/info");
+  // The directory the GUI was launched from wins; the remembered cwd is only reused
+  // when relaunching from the same directory.
+  if (localStorage.getItem("cpg.launchCwd") !== info.default_cwd) {
+    localStorage.setItem("cpg.launchCwd", info.default_cwd);
+    localStorage.removeItem("cpg.cwd");
+  }
+  $("cwd").value = localStorage.getItem("cpg.cwd") || info.default_cwd;
+  const b = $("authBadge");
+  b.textContent = info.api_key_present ? `API key (${info.api_key_from})` : "no API key!";
+  b.className = "badge " + (info.api_key_present ? "ok" : "err");
+  b.title = info.api_key_present ? "ANTHROPIC_API_KEY will be passed to claude; the init event confirms the source" : "Set ANTHROPIC_API_KEY (environment or \"env\" in ~/.claude/settings.json) or put the key in ~/.config/claude-api-ui/api_key";
+  refreshSessions();
+  $("prompt").focus();
+})();
+</script>
+</body>
+</html>
